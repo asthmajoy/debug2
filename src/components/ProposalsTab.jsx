@@ -12,7 +12,8 @@ const ProposalsTab = ({
   queueProposalWithThreatLevel, // Updated prop name
   executeProposal, 
   claimRefund,
-  loading
+  loading,
+  contracts // Make sure this prop is passed
 }) => {
   const [proposalType, setProposalType] = useState('all');
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -188,46 +189,113 @@ const ProposalsTab = ({
           throw new Error("Proposal not found");
         }
         
-        // Prepare parameters based on proposal type
-        let target, value, data;
+        // Make sure target is a valid address
+        let target = proposal.target;
         
-        switch (parseInt(proposal.type)) {
-          case PROPOSAL_TYPES.GENERAL:
-            target = proposal.target;
-            value = 0; // No ETH being sent
-            data = proposal.callData;
-            break;
-          
-          case PROPOSAL_TYPES.WITHDRAWAL:
-            target = proposal.recipient;
-            value = typeof proposal.amount === 'string' 
-              ? ethers.utils.parseEther(proposal.amount) 
-              : proposal.amount;
-            data = '0x'; // No call data for simple ETH transfer
-            break;
-          
-          case PROPOSAL_TYPES.TOKEN_TRANSFER:
-          case PROPOSAL_TYPES.TOKEN_MINT:
-          case PROPOSAL_TYPES.TOKEN_BURN:
-          case PROPOSAL_TYPES.EXTERNAL_ERC20_TRANSFER:
-            target = proposal.type === PROPOSAL_TYPES.EXTERNAL_ERC20_TRANSFER 
-              ? proposal.token 
-              : proposal.target || ethers.constants.AddressZero;
-            value = 0;
-            data = proposal.callData || '0x';
-            break;
-          
-          case PROPOSAL_TYPES.GOVERNANCE_CHANGE:
-            target = proposal.target || ethers.constants.AddressZero;
-            value = 0;
-            data = proposal.callData || '0x';
-            break;
-            
-          default:
-            throw new Error("Unknown proposal type");
+        // Check if contracts object exists
+        if (!contracts) {
+          console.error("Contracts object is undefined or null");
+          throw new Error("Contracts not available. Please check your connection and try again.");
         }
         
-        // Call queueProposalWithThreatLevel instead of queueProposal
+        // Log available contracts for debugging
+        console.log("Available contracts:", Object.keys(contracts || {}));
+        console.log("justToken address:", contracts.justToken?.address);
+        console.log("governance address:", contracts.governance?.address);
+        
+        // Set appropriate target address based on proposal type
+        const proposalType = parseInt(proposal.type);
+        
+        // Debugging info
+        console.log(`Queueing proposal type: ${proposalType}`);
+        console.log(`Initial target: ${target}`);
+        console.log(`Recipient: ${proposal.recipient}`);
+        console.log(`Token: ${proposal.token}`);
+        
+        // Different handling based on proposal type
+        switch (proposalType) {
+          case PROPOSAL_TYPES.WITHDRAWAL:
+            // For withdrawals, target should be the recipient
+            target = proposal.recipient;
+            break;
+            
+          case PROPOSAL_TYPES.TOKEN_TRANSFER:
+            // For token transfers, target is usually the governance token contract
+            if (!target || target === ethers.constants.AddressZero) {
+              // Check if justToken exists before accessing its address
+              if (contracts.justToken && contracts.justToken.address) {
+                target = contracts.justToken.address;
+              } else if (contracts.token && contracts.token.address) {
+                // Try alternative naming if justToken doesn't exist
+                target = contracts.token.address;
+              }
+            }
+            break;
+            
+          case PROPOSAL_TYPES.EXTERNAL_ERC20_TRANSFER:
+            // For external ERC20 transfers, target is the token contract
+            target = proposal.token;
+            break;
+            
+          case PROPOSAL_TYPES.TOKEN_MINT:
+          case PROPOSAL_TYPES.TOKEN_BURN:
+            // For token operations, target is the governance token
+            // Check if justToken exists before accessing its address
+            if (contracts.justToken && contracts.justToken.address) {
+              target = contracts.justToken.address;
+            } else if (contracts.token && contracts.token.address) {
+              // Try alternative naming if justToken doesn't exist
+              target = contracts.token.address;
+            }
+            break;
+            
+          case PROPOSAL_TYPES.GOVERNANCE_CHANGE:
+            // For governance changes, target is the governance contract itself
+            if (contracts.governance && contracts.governance.address) {
+              target = contracts.governance.address;
+            }
+            break;
+        }
+        
+        console.log(`Final target after type-specific handling: ${target}`);
+        
+        // If target is still not valid, check if we can use a fallback
+        if (!target || target === ethers.constants.AddressZero) {
+          console.log("No valid target found, attempting to find a fallback...");
+          
+          // Try these options in order
+          if (contracts.governance && contracts.governance.address) {
+            console.log("Using governance contract as fallback target");
+            target = contracts.governance.address;
+          } else if (contracts.timelock && contracts.timelock.address) {
+            console.log("Using timelock contract as fallback target");
+            target = contracts.timelock.address;
+          } else if (contracts.token && contracts.token.address) {
+            console.log("Using token contract as fallback target");
+            target = contracts.token.address;
+          } else if (contracts.justToken && contracts.justToken.address) {
+            console.log("Using justToken contract as fallback target");
+            target = contracts.justToken.address;
+          }
+        }
+        
+        // Final verification
+        if (!target || target === ethers.constants.AddressZero) {
+          throw new Error("Invalid target address for this proposal - could not determine appropriate contract address");
+        }
+        
+        // Parse value correctly based on proposal type
+        let value = ethers.constants.Zero;
+        if (parseInt(proposal.type) === PROPOSAL_TYPES.WITHDRAWAL) {
+          value = typeof proposal.amount === 'string' 
+            ? ethers.utils.parseEther(proposal.amount) 
+            : proposal.amount;
+        }
+        
+        // Use appropriate data
+        const data = proposal.callData || '0x';
+        
+        // Call queueProposalWithThreatLevel
         await queueProposalWithThreatLevel(target, value, data);
       } else {
         // For other actions, just pass the proposalId

@@ -236,28 +236,29 @@ const JustDAODashboard = () => {
         )}
         
         {activeTab === 'proposals' && (
-          <ProposalsTab 
-            proposals={proposalsHook.proposals.map(proposal => ({
-              ...proposal,
-              id: String(proposal.id),
-              state: safeStringToNumber(proposal.state),
-              yesVotes: formatNumber(proposal.yesVotes),
-              noVotes: formatNumber(proposal.noVotes),
-              abstainVotes: formatNumber(proposal.abstainVotes),
-              snapshotId: String(proposal.snapshotId)
-            }))}
-            createProposal={proposalsHook.createProposal}
-            cancelProposal={proposalsHook.cancelProposal}
-            queueProposalWithThreatLevel={proposalsHook.queueProposalWithThreatLevel}
-            executeProposal={proposalsHook.executeProposal}
-            claimRefund={proposalsHook.claimRefund}
-            loading={proposalsHook.loading}
-            user={{
-              ...userData,
-              balance: formatTokenAmount(userData.balance)
-            }}
-          />
-        )}
+  <ProposalsTab 
+    proposals={proposalsHook.proposals.map(proposal => ({
+      ...proposal,
+      id: String(proposal.id),
+      state: safeStringToNumber(proposal.state),
+      yesVotes: formatNumber(proposal.yesVotes),
+      noVotes: formatNumber(proposal.noVotes),
+      abstainVotes: formatNumber(proposal.abstainVotes),
+      snapshotId: String(proposal.snapshotId)
+    }))}
+    createProposal={proposalsHook.createProposal}
+    cancelProposal={proposalsHook.cancelProposal}
+    queueProposalWithThreatLevel={proposalsHook.queueProposalWithThreatLevel}
+    executeProposal={proposalsHook.executeProposal}
+    claimRefund={proposalsHook.claimRefund}
+    loading={proposalsHook.loading}
+    user={{
+      ...userData,
+      balance: formatTokenAmount(userData.balance)
+    }}
+    contracts={contracts} // Make sure this line exists
+  />
+)}
         
         {activeTab === 'vote' && (
           <VoteTab 
