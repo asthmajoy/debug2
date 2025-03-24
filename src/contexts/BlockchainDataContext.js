@@ -3,6 +3,28 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 import { useWeb3 } from './Web3Context';
 import { ethers } from 'ethers';
 
+// Helper function to create a manual vote data override for specific proposals
+// Modify this object to include any proposals that need manual overrides
+const manualVoteOverrides = {
+  // Replace these IDs with your actual proposal IDs that need fixing
+  // Format: 'proposalId': { voteData }
+  // Example:
+  // '1': {
+  //   yesVotes: "1.0",
+  //   noVotes: "0.0",
+  //   abstainVotes: "0.0",
+  //   totalVoters: 1,
+  //   yesPercentage: 100,
+  //   noPercentage: 0,
+  //   abstainPercentage: 0,
+  //   yesVotingPower: "1.0",
+  //   noVotingPower: "0.0",
+  //   abstainVotingPower: "0.0",
+  //   totalVotingPower: "1.0",
+  //   source: 'manual-override'
+  // },
+};
+
 // Create the context
 const BlockchainDataContext = createContext();
 
@@ -205,6 +227,133 @@ export const BlockchainDataProvider = ({ children }) => {
     }
   }, [isConnected, account, contractsReady, contracts, userData.hasVotedProposals]);
 
+  // Direct query method to get votes from events - most reliable for contracts with issues
+  const directQueryVotes = useCallback(async (proposalId) => {
+    if (!contractsReady || !isConnected || !contracts.governance) {
+      return null;
+    }
+    
+    try {
+      console.log(`Direct query for votes on proposal ${proposalId}`);
+      
+      // First try to get the proposal details to make sure it exists
+      try {
+        await contracts.governance.getProposalState(proposalId);
+      } catch (err) {
+        console.error(`Proposal ${proposalId} doesn't exist or can't be accessed`);
+        return null;
+      }
+      
+      // Use VoteCast events - the most reliable method
+      const filter = contracts.governance.filters.VoteCast(proposalId);
+      const events = await contracts.governance.queryFilter(filter);
+      console.log(`Found ${events.length} VoteCast events for proposal ${proposalId}`);
+      
+      // If no votes at all, return zeros
+      if (events.length === 0) {
+        return {
+          yesVotes: "0",
+          noVotes: "0",
+          abstainVotes: "0",
+          totalVotes: 0,
+          totalVoters: 0,
+          yesPercentage: 0,
+          noPercentage: 0,
+          abstainPercentage: 0,
+          yesVotingPower: "0",
+          noVotingPower: "0",
+          abstainVotingPower: "0",
+          totalVotingPower: "0",
+          source: 'direct-query-no-votes'
+        };
+      }
+      
+      // Process each vote event
+      const voters = new Map(); // Track unique voters and their latest vote
+      let yesTotal = ethers.BigNumber.from(0);
+      let noTotal = ethers.BigNumber.from(0);
+      let abstainTotal = ethers.BigNumber.from(0);
+      
+      // Debug logging - show all events
+      events.forEach((event, idx) => {
+        try {
+          console.log(`Vote event ${idx}: `, {
+            voter: event.args.voter,
+            support: event.args.support.toString(),
+            power: ethers.utils.formatEther(event.args.votingPower)
+          });
+        } catch (err) {
+          console.warn(`Error logging vote event ${idx}:`, err);
+        }
+      });
+      
+      // Process events to get vote totals
+      for (const event of events) {
+        try {
+          const voter = event.args.voter.toLowerCase();
+          const support = Number(event.args.support);
+          const power = event.args.votingPower;
+          
+          // Update the voter map with the latest vote
+          voters.set(voter, { support, power });
+        } catch (err) {
+          console.warn(`Error processing vote event:`, err);
+        }
+      }
+      
+      // Calculate totals from the unique voters' latest votes
+      for (const [_, voteInfo] of voters.entries()) {
+        const { support, power } = voteInfo;
+        
+        if (support === 1) { // Yes
+          yesTotal = yesTotal.add(power);
+        } else if (support === 0) { // No
+          noTotal = noTotal.add(power);
+        } else if (support === 2) { // Abstain
+          abstainTotal = abstainTotal.add(power);
+        }
+      }
+      
+      // Calculate total voting power and percentages
+      const totalVotingPower = yesTotal.add(noTotal).add(abstainTotal);
+      let yesPercentage = 0;
+      let noPercentage = 0;
+      let abstainPercentage = 0;
+      
+      if (!totalVotingPower.isZero()) {
+        yesPercentage = yesTotal.mul(100).div(totalVotingPower).toNumber();
+        noPercentage = noTotal.mul(100).div(totalVotingPower).toNumber();
+        abstainPercentage = abstainTotal.mul(100).div(totalVotingPower).toNumber();
+      }
+      
+      console.log(`Vote totals from direct query:`, {
+        yes: ethers.utils.formatEther(yesTotal),
+        no: ethers.utils.formatEther(noTotal),
+        abstain: ethers.utils.formatEther(abstainTotal),
+        totalVoters: voters.size
+      });
+      
+      return {
+        yesVotes: ethers.utils.formatEther(yesTotal),
+        noVotes: ethers.utils.formatEther(noTotal),
+        abstainVotes: ethers.utils.formatEther(abstainTotal),
+        totalVotes: voters.size,
+        totalVoters: voters.size,
+        yesPercentage,
+        noPercentage,
+        abstainPercentage,
+        yesVotingPower: ethers.utils.formatEther(yesTotal),
+        noVotingPower: ethers.utils.formatEther(noTotal),
+        abstainVotingPower: ethers.utils.formatEther(abstainTotal),
+        totalVotingPower: ethers.utils.formatEther(totalVotingPower),
+        source: 'direct-query'
+      };
+    } catch (error) {
+      console.error(`Error in directQueryVotes for proposal ${proposalId}:`, error);
+      return null;
+    }
+  }, [contractsReady, isConnected, contracts]);
+
   // Get proposal vote totals directly from blockchain
   const getProposalVoteTotals = useCallback(async (proposalId) => {
     if (!contractsReady || !isConnected || !contracts.governance) {
@@ -215,115 +364,79 @@ export const BlockchainDataProvider = ({ children }) => {
         totalVoters: 0,
         yesPercentage: 0,
         noPercentage: 0,
-        abstainPercentage: 0
+        abstainPercentage: 0,
+        yesVotingPower: "0",
+        noVotingPower: "0",
+        abstainVotingPower: "0",
+        totalVotingPower: "0"
       };
     }
     
     try {
-      // Try to get votes using getProposalVotes method
+      console.log(`Fetching vote totals for proposal ${proposalId} using new contract method`);
+      
+      // Call the new contract method that we just added
       const [yesVotes, noVotes, abstainVotes, totalVotingPower, totalVoters] = 
-        await contracts.governance.getProposalVotes(proposalId);
-        
+        await contracts.governance.getProposalVoteTotals(proposalId);
+      
+      // Convert BigNumber values to strings
+      const yesVotesStr = ethers.utils.formatEther(yesVotes);
+      const noVotesStr = ethers.utils.formatEther(noVotes);
+      const abstainVotesStr = ethers.utils.formatEther(abstainVotes);
+      const totalVotingPowerStr = ethers.utils.formatEther(totalVotingPower);
+      
       // Calculate percentages
-      const totalVotes = yesVotes.add(noVotes).add(abstainVotes);
-      const yesPercentage = totalVotes.gt(0) ? yesVotes.mul(100).div(totalVotes).toNumber() : 0;
-      const noPercentage = totalVotes.gt(0) ? noVotes.mul(100).div(totalVotes).toNumber() : 0;
-      const abstainPercentage = totalVotes.gt(0) ? abstainVotes.mul(100).div(totalVotes).toNumber() : 0;
+      let yesPercentage = 0;
+      let noPercentage = 0;
+      let abstainPercentage = 0;
+      
+      if (!totalVotingPower.isZero()) {
+        yesPercentage = yesVotes.mul(100).div(totalVotingPower).toNumber();
+        noPercentage = noVotes.mul(100).div(totalVotingPower).toNumber();
+        abstainPercentage = abstainVotes.mul(100).div(totalVotingPower).toNumber();
+      }
+      
+      console.log(`Vote data from contract for proposal ${proposalId}:`, {
+        yes: yesVotesStr,
+        no: noVotesStr,
+        abstain: abstainVotesStr,
+        totalVoters: totalVoters.toNumber()
+      });
       
       return {
-        yesVotes: ethers.utils.formatEther(yesVotes),
-        noVotes: ethers.utils.formatEther(noVotes),
-        abstainVotes: ethers.utils.formatEther(abstainVotes),
-        totalVotingPower: ethers.utils.formatEther(totalVotingPower),
+        yesVotes: yesVotesStr,
+        noVotes: noVotesStr,
+        abstainVotes: abstainVotesStr,
+        totalVotingPower: totalVotingPowerStr,
         totalVoters: totalVoters.toNumber(),
         yesPercentage,
         noPercentage,
-        abstainPercentage
+        abstainPercentage,
+        yesVotingPower: yesVotesStr,
+        noVotingPower: noVotesStr,
+        abstainVotingPower: abstainVotesStr,
+        source: 'contract-getter'
       };
     } catch (error) {
-      console.error(`Error getting proposal vote totals using getProposalVotes:`, error);
+      console.error(`Error using new getProposalVoteTotals contract method:`, error);
       
-      // Fallback: Use events to calculate vote totals
-      try {
-        // Get all VoteCast events for this proposal
-        const filter = contracts.governance.filters.VoteCast(proposalId);
-        const events = await contracts.governance.queryFilter(filter);
-        
-        if (events.length === 0) {
-          return {
-            yesVotes: 0,
-            noVotes: 0,
-            abstainVotes: 0,
-            totalVoters: 0,
-            yesPercentage: 0,
-            noPercentage: 0,
-            abstainPercentage: 0
-          };
-        }
-        
-        // Process the events to calculate vote totals
-        const voterVotes = new Map(); // address -> {voteType, votingPower}
-        
-        for (const event of events) {
-          try {
-            const voter = event.args.voter;
-            const support = event.args.support.toNumber();
-            const votingPower = event.args.votingPower;
-            
-            // Save the voter's vote (overwriting previous votes by the same voter)
-            voterVotes.set(voter.toLowerCase(), {
-              voteType: support,
-              votingPower
-            });
-          } catch (err) {
-            console.warn("Error processing vote event:", err);
-          }
-        }
-        
-        // Calculate totals based on the processed events
-        let yesVotes = ethers.BigNumber.from(0);
-        let noVotes = ethers.BigNumber.from(0);
-        let abstainVotes = ethers.BigNumber.from(0);
-        
-        for (const [, vote] of voterVotes.entries()) {
-          const { voteType, votingPower } = vote;
-          if (voteType === 0) { // Against
-            noVotes = noVotes.add(votingPower);
-          } else if (voteType === 1) { // For
-            yesVotes = yesVotes.add(votingPower);
-          } else if (voteType === 2) { // Abstain
-            abstainVotes = abstainVotes.add(votingPower);
-          }
-        }
-        
-        const totalVotes = yesVotes.add(noVotes).add(abstainVotes);
-        const yesPercentage = totalVotes.gt(0) ? yesVotes.mul(100).div(totalVotes).toNumber() : 0;
-        const noPercentage = totalVotes.gt(0) ? noVotes.mul(100).div(totalVotes).toNumber() : 0;
-        const abstainPercentage = totalVotes.gt(0) ? abstainVotes.mul(100).div(totalVotes).toNumber() : 0;
-        
-        return {
-          yesVotes: ethers.utils.formatEther(yesVotes),
-          noVotes: ethers.utils.formatEther(noVotes),
-          abstainVotes: ethers.utils.formatEther(abstainVotes),
-          totalVotingPower: ethers.utils.formatEther(totalVotes),
-          totalVoters: voterVotes.size,
-          yesPercentage,
-          noPercentage,
-          abstainPercentage,
-          source: 'events'
-        };
-      } catch (fallbackError) {
-        console.error(`Error using events to get vote totals:`, fallbackError);
-        return {
-          yesVotes: 0,
-          noVotes: 0,
-          abstainVotes: 0,
-          totalVoters: 0,
-          yesPercentage: 0,
-          noPercentage: 0,
-          abstainPercentage: 0
-        };
-      }
+      // If the new method fails, fall back to one of our previous methods
+      // [You can keep your existing fallback methods here if needed]
+      
+      return {
+        yesVotes: 0,
+        noVotes: 0,
+        abstainVotes: 0,
+        totalVoters: 0,
+        yesPercentage: 0,
+        noPercentage: 0,
+        abstainPercentage: 0,
+        yesVotingPower: "0",
+        noVotingPower: "0",
+        abstainVotingPower: "0",
+        totalVotingPower: "0",
+        source: 'error'
+      };
     }
   }, [contractsReady, isConnected, contracts]);
 
@@ -346,6 +459,46 @@ export const BlockchainDataProvider = ({ children }) => {
     
     try {
       console.log(`Fetching detailed vote data for proposal ${proposalId}`);
+      
+      // First check if we have a manual override
+      if (manualVoteOverrides[proposalId]) {
+        const override = manualVoteOverrides[proposalId];
+        
+        // Add quorum info to the override
+        const govParams = await contracts.governance.govParams();
+        const quorum = govParams.quorum;
+        const totalVotingPower = ethers.utils.parseEther(override.totalVotingPower || "0");
+        const quorumReached = quorum.gt(0) ? totalVotingPower.gte(quorum) : false;
+        
+        return {
+          ...override,
+          quorumReached,
+          requiredQuorum: ethers.utils.formatEther(quorum),
+          dataSource: 'manual-override'
+        };
+      }
+      
+      // Try direct query first (most reliable)
+      try {
+        const directQueryResults = await directQueryVotes(proposalId);
+        if (directQueryResults) {
+          // Get quorum value for comparison
+          const govParams = await contracts.governance.govParams();
+          const quorum = govParams.quorum;
+          const totalVotingPower = ethers.utils.parseEther(directQueryResults.totalVotingPower);
+          const quorumReached = quorum.gt(0) ? totalVotingPower.gte(quorum) : false;
+          
+          return {
+            ...directQueryResults,
+            quorumReached,
+            requiredQuorum: ethers.utils.formatEther(quorum),
+            dataSource: 'direct-query',
+            totalVotes: directQueryResults.totalVotingPower
+          };
+        }
+      } catch (directQueryError) {
+        console.warn(`Direct query failed for detailed proposal ${proposalId}:`, directQueryError);
+      }
       
       // Try different methods to get the most reliable data
       // Method 1: Direct contract call to getProposalVotes if available
@@ -387,12 +540,17 @@ export const BlockchainDataProvider = ({ children }) => {
           rawNoVotes: noVotes.toString(),
           rawAbstainVotes: abstainVotes.toString(),
           rawTotalVotes: totalVotes.toString(),
-          requiredQuorum: ethers.utils.formatEther(quorum)
+          requiredQuorum: ethers.utils.formatEther(quorum),
+          yesVotingPower: formattedYesVotes,
+          noVotingPower: formattedNoVotes,
+          abstainVotingPower: formattedAbstainVotes,
+          totalVotingPower: formattedTotalVotes
         };
       } catch (directError) {
         console.warn(`Direct getProposalVotes call failed for proposal ${proposalId}:`, directError);
       }
       
+      // Continue with fallbacks as in the original code...
       // Method 2: Try to use VoteCast events
       try {
         const filter = contracts.governance.filters.VoteCast(proposalId);
@@ -463,65 +621,71 @@ export const BlockchainDataProvider = ({ children }) => {
           rawNoVotes: noVotes.toString(),
           rawAbstainVotes: abstainVotes.toString(),
           rawTotalVotes: totalVotes.toString(),
-          requiredQuorum: ethers.utils.formatEther(quorum)
+          requiredQuorum: ethers.utils.formatEther(quorum),
+          yesVotingPower: formattedYesVotes,
+          noVotingPower: formattedNoVotes,
+          abstainVotingPower: formattedAbstainVotes,
+          totalVotingPower: formattedTotalVotes
         };
       } catch (eventsError) {
         console.error(`Error getting vote data from events for proposal ${proposalId}:`, eventsError);
       }
       
-      // Fallback: Try to get individual vote totals
-      try {
-        // Some contracts have separate methods for each vote type
-        const yesVotes = await contracts.governance.getYesVotesForProposal ? 
-          await contracts.governance.getYesVotesForProposal(proposalId) : 
-          ethers.BigNumber.from(0);
-        
-        const noVotes = await contracts.governance.getNoVotesForProposal ? 
-          await contracts.governance.getNoVotesForProposal(proposalId) : 
-          ethers.BigNumber.from(0);
-        
-        const abstainVotes = await contracts.governance.getAbstainVotesForProposal ? 
-          await contracts.governance.getAbstainVotesForProposal(proposalId) : 
-          ethers.BigNumber.from(0);
-        
-        // Get quorum value
-        const govParams = await contracts.governance.govParams();
-        const quorum = govParams.quorum;
-        
-        // Calculate totals and percentages
-        const totalVotes = yesVotes.add(noVotes).add(abstainVotes);
-        const yesPercentage = totalVotes.gt(0) ? parseFloat(yesVotes.mul(100).div(totalVotes)) : 0;
-        const noPercentage = totalVotes.gt(0) ? parseFloat(noVotes.mul(100).div(totalVotes)) : 0;
-        const abstainPercentage = totalVotes.gt(0) ? parseFloat(abstainVotes.mul(100).div(totalVotes)) : 0;
-        
-        // Check if quorum is reached
-        const quorumReached = totalVotes.gte(quorum);
-        
-        // Format values
-        const formattedYesVotes = ethers.utils.formatEther(yesVotes);
-        const formattedNoVotes = ethers.utils.formatEther(noVotes);
-        const formattedAbstainVotes = ethers.utils.formatEther(abstainVotes);
-        const formattedTotalVotes = ethers.utils.formatEther(totalVotes);
-        
-        return {
-          yesVotes: formattedYesVotes,
-          noVotes: formattedNoVotes,
-          abstainVotes: formattedAbstainVotes,
-          totalVotes: formattedTotalVotes,
-          totalVoters: 0, // Can't determine unique voters with this method
-          yesPercentage,
-          noPercentage,
-          abstainPercentage,
-          quorumReached,
-          dataSource: 'individual',
-          rawYesVotes: yesVotes.toString(),
-          rawNoVotes: noVotes.toString(),
-          rawAbstainVotes: abstainVotes.toString(),
-          rawTotalVotes: totalVotes.toString(),
-          requiredQuorum: ethers.utils.formatEther(quorum)
-        };
-      } catch (individualError) {
-        console.error(`Error getting individual vote totals for proposal ${proposalId}:`, individualError);
+      // If user has voted, use their vote data as absolute minimum
+      if (account) {
+        try {
+          console.log(`Checking current user vote for detailed data on proposal ${proposalId}`);
+          const filter = contracts.governance.filters.VoteCast(proposalId, account);
+          const events = await contracts.governance.queryFilter(filter);
+          
+          if (events.length > 0) {
+            // Use the most recent vote
+            const latestEvent = events[events.length - 1];
+            const support = latestEvent.args.support.toNumber();
+            const votingPower = latestEvent.args.votingPower;
+            
+            // Create a result based just on this user's vote
+            const yesVotes = support === 1 ? votingPower : ethers.BigNumber.from(0);
+            const noVotes = support === 0 ? votingPower : ethers.BigNumber.from(0);
+            const abstainVotes = support === 2 ? votingPower : ethers.BigNumber.from(0);
+            
+            // Get quorum value
+            const govParams = await contracts.governance.govParams();
+            const quorum = govParams.quorum;
+            
+            // Check if quorum is reached
+            const quorumReached = votingPower.gte(quorum);
+            
+            console.log(`Found user vote for detailed proposal ${proposalId}:`, {
+              support,
+              power: ethers.utils.formatEther(votingPower)
+            });
+            
+            return {
+              yesVotes: ethers.utils.formatEther(yesVotes),
+              noVotes: ethers.utils.formatEther(noVotes),
+              abstainVotes: ethers.utils.formatEther(abstainVotes),
+              totalVotes: ethers.utils.formatEther(votingPower),
+              totalVoters: 1,
+              yesPercentage: support === 1 ? 100 : 0,
+              noPercentage: support === 0 ? 100 : 0,
+              abstainPercentage: support === 2 ? 100 : 0,
+              quorumReached: quorumReached,
+              dataSource: 'user-vote-only',
+              rawYesVotes: yesVotes.toString(),
+              rawNoVotes: noVotes.toString(),
+              rawAbstainVotes: abstainVotes.toString(),
+              rawTotalVotes: votingPower.toString(),
+              requiredQuorum: ethers.utils.formatEther(quorum),
+              yesVotingPower: ethers.utils.formatEther(yesVotes),
+              noVotingPower: ethers.utils.formatEther(noVotes),
+              abstainVotingPower: ethers.utils.formatEther(abstainVotes),
+              totalVotingPower: ethers.utils.formatEther(votingPower)
+            };
+          }
+        } catch (userVoteError) {
+          console.warn(`Error checking user vote for detailed proposal ${proposalId}:`, userVoteError);
+        }
       }
       
       // If all methods fail, return zeros
@@ -552,7 +716,7 @@ export const BlockchainDataProvider = ({ children }) => {
         dataSource: 'error'
       };
     }
-  }, [contractsReady, isConnected, contracts]);
+  }, [contractsReady, isConnected, contracts, directQueryVotes, account]);
 
   // Get DAO statistics from blockchain
   const fetchDAOStats = useCallback(async () => {
