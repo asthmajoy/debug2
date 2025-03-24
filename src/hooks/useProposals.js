@@ -1,4 +1,4 @@
-// src/hooks/useProposals.js - Updated to work with new contract naming
+// src/hooks/useProposals.js - Updated to work with timelock contract
 import { useState, useEffect, useCallback } from 'react';
 import { ethers } from 'ethers';
 import { useWeb3 } from '../contexts/Web3Context';
@@ -750,41 +750,152 @@ export function useProposals() {
     }
   };
 
-  const queueProposal = async (proposalId) => {
+  // New function to queue proposal with threat level
+  const queueProposalWithThreatLevel = async (target, value, data) => {
     if (!isConnected || !contractsReady) throw new Error("Not connected");
-    if (!contracts.governance) throw new Error("Governance contract not initialized");
+    if (!contracts.timelock) throw new Error("Timelock contract not initialized");
     
     try {
       setLoading(true);
       setError(null);
       
-      // Verify proposal state before queueing
-      const state = await contracts.governance.getProposalState(proposalId);
-      if (state !== PROPOSAL_STATES.SUCCEEDED) {
-        throw new Error("Only succeeded proposals can be queued");
+      console.log(`======= DEBUGGING QUEUE TRANSACTION START =======`);
+      console.log(`Target address: ${target}`);
+      console.log(`Value: ${value.toString()}`);
+      console.log(`Data: ${data}`);
+      
+      // Check if target is valid
+      if (!target || target === ethers.constants.AddressZero) {
+        console.error("Invalid target address:", target);
+        throw new Error("Invalid target address");
       }
       
-      const tx = await contracts.governance.queueProposal(proposalId, {
-        gasLimit: 500000 // Higher gas limit for queueing due to complexity
-      });
+      // Debug the timelock contract
+      console.log("Timelock contract address:", contracts.timelock.address);
       
-      await tx.wait();
-      console.log(`Proposal ${proposalId} queued successfully`);
+      // Check user's role on the timelock
+      let isProposer = false;
+      try {
+        const proposerRole = await contracts.timelock.PROPOSER_ROLE();
+        isProposer = await contracts.timelock.hasRole(proposerRole, account);
+        console.log(`User ${account} has PROPOSER_ROLE: ${isProposer}`);
+      } catch (roleErr) {
+        console.warn("Could not check PROPOSER_ROLE:", roleErr);
+      }
+      
+      // Check token-based authorization
+      let hasTokens = false;
+      try {
+        hasTokens = await contracts.timelock.isAuthorizedByTokens(account);
+        console.log(`User ${account} is authorized by tokens: ${hasTokens}`);
+      } catch (tokenErr) {
+        console.warn("Could not check token authorization:", tokenErr);
+      }
+      
+      if (!isProposer && !hasTokens) {
+        console.warn("User may not have permission to queue transactions");
+        // Continue anyway, let the contract rejection provide the real error
+      }
+      
+      // Use higher fixed gas limit to avoid estimation issues
+      const gasLimit = ethers.BigNumber.from("2000000"); // 2 million gas
+      console.log(`Using fixed gas limit: ${gasLimit.toString()}`);
+      
+      console.log("Sending queueTransactionWithThreatLevel transaction...");
+      
+      // Format value as BigNumber if it's not already
+      const valueToSend = typeof value === 'string' ? 
+        ethers.utils.parseEther(value) : 
+        ethers.BigNumber.from(value);
+        
+      console.log("Value after conversion:", valueToSend.toString());
+      
+      // Send the transaction with higher gas limit and lower gas price
+      const tx = await contracts.timelock.queueTransactionWithThreatLevel(
+        target,
+        valueToSend,
+        data || '0x',
+        {
+          gasLimit: gasLimit,
+          gasPrice: (await contracts.timelock.provider.getGasPrice()).mul(90).div(100) // 90% of current gas price
+        }
+      );
+      
+      console.log(`Transaction sent! Hash: ${tx.hash}`);
+      console.log("Waiting for transaction confirmation...");
+      
+      const receipt = await tx.wait();
+      console.log("Transaction receipt:", receipt);
+      
+      if (receipt.status === 0) {
+        throw new Error("Transaction failed on-chain. Check blockchain explorer for details.");
+      }
+      
+      // Try to parse logs for more information
+      try {
+        const transactionQueuedEvents = receipt.logs
+          .filter(log => log.topics[0] === ethers.utils.id("TransactionQueued(bytes32,address,uint256,bytes,uint256,uint8)"));
+        
+        if (transactionQueuedEvents.length > 0) {
+          console.log("TransactionQueued event found!");
+          // You could decode the event here for more details
+        } else {
+          console.warn("No TransactionQueued event found in logs");
+        }
+      } catch (logErr) {
+        console.warn("Error parsing logs:", logErr);
+      }
+      
+      console.log(`======= DEBUGGING QUEUE TRANSACTION END =======`);
       
       // Refresh proposals list
       await fetchProposals();
       
       return true;
     } catch (err) {
-      console.error("Error queuing proposal:", err);
-      const errorMessage = extractErrorMessage(err);
+      console.error(`======= QUEUE TRANSACTION ERROR =======`);
+      console.error("Original error:", err);
+      
+      // Try to extract more specific error information
+      let errorMessage = "Failed to queue proposal";
+      
+      // Check for specific error patterns in different error formats
+      if (err.error && err.error.message) {
+        errorMessage = err.error.message;
+        console.error("Error from provider:", errorMessage);
+      } else if (err.data) {
+        // Transaction may have reverted with data
+        errorMessage = `Transaction reverted: ${err.data}`;
+        console.error("Transaction revert data:", err.data);
+      } else if (err.message) {
+        errorMessage = err.message;
+        
+        // Extract error from message if possible
+        if (err.message.includes("execution reverted")) {
+          const revertMatch = err.message.match(/execution reverted: (.*?)"/);
+          if (revertMatch && revertMatch[1]) {
+            errorMessage = `Transaction reverted: ${revertMatch[1]}`;
+          }
+        }
+        
+        // Check for error codes
+        if (err.code) {
+          console.error(`Error code: ${err.code}`);
+          if (err.code === 'UNPREDICTABLE_GAS_LIMIT') {
+            errorMessage = "The transaction cannot be executed with the specified parameters. There may be an issue with the contract configuration.";
+          } else if (err.code === -32603) {
+            errorMessage = "Internal JSON-RPC error. The transaction was rejected by the blockchain node.";
+          }
+        }
+      }
+      
+      console.error("Final error message:", errorMessage);
       setError(errorMessage);
       throw new Error(errorMessage);
     } finally {
       setLoading(false);
     }
   };
-
   const executeProposal = async (proposalId) => {
     if (!isConnected || !contractsReady) throw new Error("Not connected");
     if (!contracts.governance) throw new Error("Governance contract not initialized");
@@ -875,7 +986,7 @@ export function useProposals() {
     fetchProposals,
     createProposal,
     cancelProposal,
-    queueProposal,
+    queueProposalWithThreatLevel, // Add the new function
     executeProposal,
     claimRefund
   };

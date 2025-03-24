@@ -9,7 +9,7 @@ const ProposalsTab = ({
   proposals, 
   createProposal, 
   cancelProposal, 
-  queueProposal, 
+  queueProposalWithThreatLevel, // Updated prop name
   executeProposal, 
   claimRefund,
   loading
@@ -180,7 +180,59 @@ const ProposalsTab = ({
   // Helper function to handle proposal actions with error handling
   const handleProposalAction = async (action, proposalId, actionName) => {
     try {
-      await action(proposalId);
+      // For queue action, we need special handling to use queueProposalWithThreatLevel
+      if (actionName === 'queuing') {
+        // Find the proposal by ID
+        const proposal = proposals.find(p => p.id === proposalId);
+        if (!proposal) {
+          throw new Error("Proposal not found");
+        }
+        
+        // Prepare parameters based on proposal type
+        let target, value, data;
+        
+        switch (parseInt(proposal.type)) {
+          case PROPOSAL_TYPES.GENERAL:
+            target = proposal.target;
+            value = 0; // No ETH being sent
+            data = proposal.callData;
+            break;
+          
+          case PROPOSAL_TYPES.WITHDRAWAL:
+            target = proposal.recipient;
+            value = typeof proposal.amount === 'string' 
+              ? ethers.utils.parseEther(proposal.amount) 
+              : proposal.amount;
+            data = '0x'; // No call data for simple ETH transfer
+            break;
+          
+          case PROPOSAL_TYPES.TOKEN_TRANSFER:
+          case PROPOSAL_TYPES.TOKEN_MINT:
+          case PROPOSAL_TYPES.TOKEN_BURN:
+          case PROPOSAL_TYPES.EXTERNAL_ERC20_TRANSFER:
+            target = proposal.type === PROPOSAL_TYPES.EXTERNAL_ERC20_TRANSFER 
+              ? proposal.token 
+              : proposal.target || ethers.constants.AddressZero;
+            value = 0;
+            data = proposal.callData || '0x';
+            break;
+          
+          case PROPOSAL_TYPES.GOVERNANCE_CHANGE:
+            target = proposal.target || ethers.constants.AddressZero;
+            value = 0;
+            data = proposal.callData || '0x';
+            break;
+            
+          default:
+            throw new Error("Unknown proposal type");
+        }
+        
+        // Call queueProposalWithThreatLevel instead of queueProposal
+        await queueProposalWithThreatLevel(target, value, data);
+      } else {
+        // For other actions, just pass the proposalId
+        await action(proposalId);
+      }
     } catch (error) {
       console.error(`Error ${actionName} proposal:`, error);
       alert(`Error ${actionName} proposal: ${error.message || 'See console for details'}`);
@@ -339,7 +391,7 @@ const ProposalsTab = ({
                 {proposal.state === PROPOSAL_STATES.SUCCEEDED && (
                   <button 
                     className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded-md text-sm"
-                    onClick={() => handleProposalAction(queueProposal, proposal.id, 'queuing')}
+                    onClick={() => handleProposalAction(queueProposalWithThreatLevel, proposal.id, 'queuing')}
                   >
                     Queue
                   </button>

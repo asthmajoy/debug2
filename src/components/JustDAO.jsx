@@ -248,7 +248,7 @@ const JustDAODashboard = () => {
             }))}
             createProposal={proposalsHook.createProposal}
             cancelProposal={proposalsHook.cancelProposal}
-            queueProposal={proposalsHook.queueProposal}
+            queueProposalWithThreatLevel={proposalsHook.queueProposalWithThreatLevel}
             executeProposal={proposalsHook.executeProposal}
             claimRefund={proposalsHook.claimRefund}
             loading={proposalsHook.loading}

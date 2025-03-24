@@ -14,7 +14,6 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
   const [selectedProposal, setSelectedProposal] = useState(null);
   const [showModal, setShowModal] = useState(false);
   const [quorum, setQuorum] = useState(null);
-  const [proposalQuorums, setProposalQuorums] = useState({});
   const [proposalVoteData, setProposalVoteData] = useState({});
   
   // Track locally which proposals the user has voted on and how
@@ -455,49 +454,19 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     
   }, [proposals, isInactiveProposal, VOTE_TYPES]);
   
-  // Fetch quorum from governance contract - DIRECTLY ACCESS IT FROM THE CONTRACT
+  // Fetch quorum from governance contract - SIMPLIFIED
   useEffect(() => {
     const fetchQuorum = async () => {
       if (!governanceContract) return;
       
       try {
-        console.log("Attempting to fetch global quorum...");
-        // Try to get from cache first
-        const cacheKey = 'quorum';
-        const cachedQuorum = blockchainDataCache.get(cacheKey);
-        if (cachedQuorum !== null) {
-          console.log("Using cached quorum:", cachedQuorum);
-          setQuorum(cachedQuorum);
-          return;
-        }
-        
-        // Your contract stores quorum in the govParams structure
-        // This is the direct way to access it based on your contract
+        // Simple direct access to the quorum value in govParams
         const params = await governanceContract.govParams();
+        
         if (params && params.quorum) {
-          // Convert to appropriate format
+          // Convert BigNumber to regular number with proper parsing
           const quorumValue = parseInt(params.quorum.toString());
-          console.log("Successfully fetched quorum from contract:", quorumValue);
           setQuorum(quorumValue);
-          
-          // Cache the result
-          blockchainDataCache.set(cacheKey, quorumValue, 3600); // Cache for 1 hour
-          
-          // Also store in proposal-specific quorums for each proposal
-          const updatedQuorums = {};
-          proposals.forEach(proposal => {
-            updatedQuorums[proposal.id] = quorumValue;
-            
-            // Also cache in proposal-specific keys
-            blockchainDataCache.set(`quorum-${proposal.id}`, quorumValue, 3600);
-          });
-          
-          setProposalQuorums(prev => ({
-            ...prev,
-            ...updatedQuorums
-          }));
-        } else {
-          console.error("Failed to get quorum: params or params.quorum is undefined", params);
         }
       } catch (error) {
         console.error("Error fetching quorum:", error);
@@ -505,67 +474,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     };
     
     fetchQuorum();
-  }, [governanceContract, proposals]);
-
-  // Debug function to help diagnose quorum issues
-  const debugQuorum = async () => {
-    console.log("=== QUORUM DEBUG INFORMATION ===");
-    console.log("Current quorum state:", quorum);
-    console.log("Current proposalQuorums state:", proposalQuorums);
-    
-    // Check what's in the cache
-    const cachedGlobalQuorum = blockchainDataCache.get('quorum');
-    console.log("Cached global quorum:", cachedGlobalQuorum);
-    
-    // Loop through proposals and check their cached quorums
-    for (const proposal of proposals) {
-      const cacheKey = `quorum-${proposal.id}`;
-      const cachedValue = blockchainDataCache.get(cacheKey);
-      console.log(`Cached quorum for proposal #${proposal.id}:`, cachedValue);
-    }
-    
-    // Try to fetch directly from contract
-    if (governanceContract) {
-      try {
-        console.log("Attempting direct contract call to govParams()...");
-        const params = await governanceContract.govParams();
-        console.log("Raw govParams result:", params);
-        
-        if (params && params.quorum) {
-          console.log("Parsed quorum value:", parseInt(params.quorum.toString()));
-        }
-      } catch (error) {
-        console.error("Error in direct contract call:", error);
-      }
-      
-      // Try different ways to access the quorum
-      try {
-        // Check if quorum is available as a direct method
-        if (typeof governanceContract.quorum === 'function') {
-          const directQuorum = await governanceContract.quorum();
-          console.log("Direct quorum() call result:", directQuorum.toString());
-        } else {
-          console.log("quorum() is not a function on this contract");
-        }
-      } catch (error) {
-        console.log("Failed to call direct quorum() method:", error.message);
-      }
-    } else {
-      console.log("governanceContract is not available");
-    }
-    
-    console.log("=== END DEBUG INFORMATION ===");
-  };
-
-  // Log quorum info when modal opens
-  useEffect(() => {
-    if (showModal && selectedProposal) {
-      console.log("Modal opened for proposal:", selectedProposal.id);
-      console.log("Quorum for this proposal:", getQuorumForProposal(selectedProposal.id));
-      console.log("Global quorum state:", quorum);
-      console.log("Has proposal-specific quorum:", proposalQuorums[selectedProposal.id] !== undefined);
-    }
-  }, [showModal, selectedProposal]);
+  }, [governanceContract]);
 
   // Filter proposals based on vote status
   const filteredProposals = proposals.filter(proposal => {
@@ -606,34 +515,6 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     return pendingVotes[proposalId] !== undefined && 
            (Date.now() - pendingVotes[proposalId].timestamp) < 60000; // Consider pending if less than 1 minute old
   }, [pendingVotes]);
-
-  // Get the quorum for a specific proposal - IMPROVED FALLBACK
-  const getQuorumForProposal = useCallback((proposalId) => {
-    // First check if we have a proposal-specific quorum
-    if (proposalQuorums[proposalId] !== undefined) {
-      return proposalQuorums[proposalId];
-    }
-    
-    // Otherwise use the global quorum
-    if (quorum !== null) {
-      return quorum;
-    }
-    
-    // As a last resort, pull from cache directly
-    const cachedQuorum = blockchainDataCache.get('quorum');
-    if (cachedQuorum !== null) {
-      return cachedQuorum;
-    }
-    
-    // If still nothing, try proposal-specific cache
-    const cachedProposalQuorum = blockchainDataCache.get(`quorum-${proposalId}`);
-    if (cachedProposalQuorum !== null) {
-      return cachedProposalQuorum;
-    }
-    
-    // Default fallback value if nothing else works
-    return 0;
-  }, [proposalQuorums, quorum]);
 
   // Function to submit a vote
   const submitVote = async (proposalId, support) => {
@@ -964,16 +845,6 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
           >
             Refresh Data
           </button>
-          
-          {/* Debug button - only for development */}
-          {process.env.NODE_ENV === 'development' && (
-            <button
-              onClick={debugQuorum}
-              className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded"
-            >
-              Debug Quorum
-            </button>
-          )}
         </div>
       </div>
       
@@ -996,9 +867,6 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
             // Get vote data
             const voteData = getVoteData(proposal);
             const isPending = hasPendingVote(proposal.id);
-            
-            // Get quorum for this proposal
-            const proposalQuorum = getQuorumForProposal(proposal.id);
             
             return (
               <div key={idx} className="bg-white p-8 rounded-lg shadow-md">
@@ -1075,19 +943,19 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                           Your voting power: <span className="font-medium">{formatToFiveDecimals(votingPower)} JST</span>
                         </div>
                         
-                        {proposalQuorum > 0 && (
+                        {quorum > 0 && (
                           <div className="mt-5 mb-5">
                             <div className="flex justify-between text-sm text-gray-700 mb-2">
                               <span className="font-medium">Quorum Progress</span>
                               <span>
-                                {formatNumberDisplay(voteData.totalVotingPower || 0)} / {formatNumberDisplay(proposalQuorum)} JST
-                                ({Math.min(100, Math.round(((voteData.totalVotingPower || 0) / (proposalQuorum || 1)) * 100))}%)
+                                {formatNumberDisplay(voteData.totalVotingPower || 0)} / {formatNumberDisplay(quorum)} JST
+                                ({Math.min(100, Math.round(((voteData.totalVotingPower || 0) / (quorum || 1)) * 100))}%)
                               </span>
                             </div>
                             <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
                               <div 
                                 className="bg-blue-500 h-full rounded-full" 
-                                style={{ width: `${Math.min(100, ((voteData.totalVotingPower || 0) / (proposalQuorum || 1)) * 100)}%` }}
+                                style={{ width: `${Math.min(100, ((voteData.totalVotingPower || 0) / (quorum || 1)) * 100)}%` }}
                               ></div>
                             </div>
                           </div>
@@ -1207,16 +1075,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                   <BarChart2 className="w-4 h-4 mr-2 text-gray-500" />
                   <div>
                     <span className="text-gray-600">Quorum:</span>{" "}
-                    {(() => {
-                      const proposalQuorum = getQuorumForProposal(selectedProposal.id);
-                      if (proposalQuorum > 0) {
-                        return `${formatNumberDisplay(proposalQuorum)} JST`;
-                      } else if (quorum > 0) {
-                        return `${formatNumberDisplay(quorum)} JST`;
-                      } else {
-                        return "Loading...";
-                      }
-                    })()}
+                    {quorum ? `${formatNumberDisplay(quorum)} JST` : "Loading..."}
                     {selectedProposal.snapshotId && (
                       <span className="ml-1 text-xs text-gray-500">
                         (Snapshot #{selectedProposal.snapshotId})
@@ -1241,7 +1100,6 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                   {(() => {
                     const voteData = getVoteData(selectedProposal);
                     const isPending = hasPendingVote(selectedProposal.id);
-                    const proposalQuorum = getQuorumForProposal(selectedProposal.id);
                     
                     return (
                       <>
@@ -1286,21 +1144,21 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                         </div>
                         
                         {/* Quorum progress */}
-                        {proposalQuorum > 0 && (
+                        {quorum > 0 && (
                           <div className="mt-4 mb-5">
                             <h5 className="text-sm font-medium mb-2">Quorum Progress</h5>
                             <div className="flex justify-between text-xs text-gray-700 mb-2">
                               <span className="font-medium">
-                                Current participation: {Math.min(100, Math.round(((voteData.totalVotingPower || 0) / (proposalQuorum || 1)) * 100))}%
+                                Current participation: {Math.min(100, Math.round(((voteData.totalVotingPower || 0) / (quorum || 1)) * 100))}%
                               </span>
                               <span>
-                                {formatNumberDisplay(voteData.totalVotingPower || 0)} / {formatNumberDisplay(proposalQuorum)} JST
+                                {formatNumberDisplay(voteData.totalVotingPower || 0)} / {formatNumberDisplay(quorum)} JST
                               </span>
                             </div>
                             <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
                               <div 
                                 className="bg-blue-500 h-full rounded-full" 
-                                style={{ width: `${Math.min(100, ((voteData.totalVotingPower || 0) / (proposalQuorum || 1)) * 100)}%` }}
+                                style={{ width: `${Math.min(100, ((voteData.totalVotingPower || 0) / (quorum || 1)) * 100)}%` }}
                               ></div>
                             </div>
                             {selectedProposal.snapshotId && (
