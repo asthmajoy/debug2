@@ -1,4 +1,4 @@
-// src/hooks/useVoting.js - Updated to remove localStorage dependency
+// src/hooks/useVoting.js - Enhanced version that uses BlockchainDataContext
 import { useState, useCallback, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { useWeb3 } from '../contexts/Web3Context';
@@ -40,12 +40,12 @@ export function useVoting() {
       }
       
       // If we can't get it from events, try to get the current snapshot as fallback
-      return await contracts.token.getCurrentSnapshotId();
+      return await contracts.justToken.getCurrentSnapshotId();
     } catch (err) {
       console.warn("Error getting proposal snapshot ID:", err);
       // Return the current snapshot as fallback
       try {
-        return await contracts.token.getCurrentSnapshotId();
+        return await contracts.justToken.getCurrentSnapshotId();
       } catch (fallbackErr) {
         console.error("Error getting current snapshot ID:", fallbackErr);
         return 0;
@@ -61,7 +61,7 @@ export function useVoting() {
   // Get the voting power of the user for a specific snapshot
   const getVotingPower = useCallback(async (snapshotId) => {
     if (!isConnected || !contractsReady || !account) return "0";
-    if (!contracts.token) return "0";
+    if (!contracts.justToken) return "0";
     
     try {
       console.log(`Getting voting power for snapshot ${snapshotId}`);
@@ -70,10 +70,10 @@ export function useVoting() {
       let actualSnapshotId = snapshotId;
       
       if (!actualSnapshotId) {
-        actualSnapshotId = await contracts.token.getCurrentSnapshotId();
+        actualSnapshotId = await contracts.justToken.getCurrentSnapshotId();
       }
       
-      const votingPower = await contracts.token.getEffectiveVotingPower(account, actualSnapshotId);
+      const votingPower = await contracts.justToken.getEffectiveVotingPower(account, actualSnapshotId);
       const formattedPower = ethers.utils.formatEther(votingPower);
       
       console.log(`Voting power at snapshot ${actualSnapshotId}: ${formattedPower}`);
@@ -169,7 +169,7 @@ export function useVoting() {
       const snapshotId = await getProposalSnapshotId(proposalId);
       
       // Check if the user has any voting power
-      const votingPower = await contracts.token.getEffectiveVotingPower(account, snapshotId);
+      const votingPower = await contracts.justToken.getEffectiveVotingPower(account, snapshotId);
       const votingPowerFormatted = ethers.utils.formatEther(votingPower);
       
       if (votingPower.isZero()) {
