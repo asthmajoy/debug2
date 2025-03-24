@@ -1,10 +1,10 @@
 // Contract addresses (update these with your deployed contract addresses)
 export const CONTRACT_ADDRESSES = {
-    token: "0x217727A0E6A67E4eB215684D50146D0151fEa742", // JustToken address
-    governance: "0x77c3914AC34E014cCc783596cb7Af539DcFC4363", // JustGovernance address
-    timelock: "0x6292A0cB58b276fBf7FEa46aD2dec796bf678E77", // JustTimelock address
-    analyticsHelper: "0x76D5401de7ac237C0424533e0d99cCBfaA37313F", // JustAnalyticsHelper address
-    daoHelper: "0x7AcC03DB32Eb157164d2356428345c79f0D56Fb7" // JustDAOHelper address 
+    token: "0xadB3C798BcDa79008FE413e05E7648f737496592", // JustToken address
+    governance: "0xA5a986861368058183b093D76E2d2036f02531E0", // JustGovernance address
+    timelock: "0xCcd1C3F96F666433ea636bcd4F5C35C730E90672", // JustTimelock address
+    analyticsHelper: "0xa333f9E1a860b0A018856aeAEb1b33A1bd6de141", // JustAnalyticsHelper address
+    daoHelper: "0x26c8acEf282bA8FF87d56D8F72cD41345BD29084" // JustDAOHelper address 
   };
   
   // Proposal Types
