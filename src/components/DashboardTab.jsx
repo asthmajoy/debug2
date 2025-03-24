@@ -67,14 +67,32 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
             }
             
             console.log(`Fetching vote data for proposal #${proposal.id}`);
+            // Use the new getProposalVoteTotals function from the context
             const data = await getProposalVoteTotals(proposal.id);
             
-            // Cache the result
-            blockchainDataCache.set(cacheKey, data);
+            // Process the data to ensure consistent format
+            const processedData = {
+              // Note: In the contract, yesVotes/noVotes/abstainVotes are actually voting power values
+              yesVotes: parseFloat(data.yesVotes) || 0,
+              noVotes: parseFloat(data.noVotes) || 0,
+              abstainVotes: parseFloat(data.abstainVotes) || 0,
+              totalVoters: data.totalVoters || 0,
+              
+              // Store percentages based on voting power
+              yesPercentage: data.yesPercentage || 0,
+              noPercentage: data.noPercentage || 0,
+              abstainPercentage: data.abstainPercentage || 0,
+              
+              // Add a timestamp to know when the data was fetched
+              fetchedAt: Date.now()
+            };
+            
+            // Cache the result with a reasonable TTL
+            blockchainDataCache.set(cacheKey, processedData);
             
             return {
               id: proposal.id,
-              data
+              data: processedData
             };
           } catch (error) {
             console.error(`Error fetching vote data for proposal ${proposal.id}:`, error);
@@ -220,22 +238,33 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
                 noPercentage: 0,
                 abstainPercentage: 0
               };
-              
-              // If no percentages are available in vote data, calculate them
-              if (!voteData.yesPercentage && !voteData.noPercentage && !voteData.abstainPercentage) {
-                const totalVotes = parseFloat(voteData.yesVotes) + parseFloat(voteData.noVotes) + parseFloat(voteData.abstainVotes);
+
+              // Ensure we have all required properties with correct types
+              const processedVoteData = {
+                // Original values from blockchain
+                yesVotingPower: parseFloat(voteData.yesVotes || 0),
+                noVotingPower: parseFloat(voteData.noVotes || 0),
+                abstainVotingPower: parseFloat(voteData.abstainVotes || 0),
+                totalVoters: voteData.totalVoters || 0,
                 
-                if (totalVotes > 0) {
-                  voteData.yesPercentage = (parseFloat(voteData.yesVotes) / totalVotes) * 100;
-                  voteData.noPercentage = (parseFloat(voteData.noVotes) / totalVotes) * 100;
-                  voteData.abstainPercentage = (parseFloat(voteData.abstainVotes) / totalVotes) * 100;
+                // Use existing percentages if available, otherwise calculate
+                yesPercentage: voteData.yesPercentage || 0,
+                noPercentage: voteData.noPercentage || 0,
+                abstainPercentage: voteData.abstainPercentage || 0
+              };
+
+              // If percentages aren't provided, calculate them based on voting power
+              if (!voteData.yesPercentage && !voteData.noPercentage && !voteData.abstainPercentage) {
+                const totalVotingPower = processedVoteData.yesVotingPower + 
+                                        processedVoteData.noVotingPower + 
+                                        processedVoteData.abstainVotingPower;
+                
+                if (totalVotingPower > 0) {
+                  processedVoteData.yesPercentage = (processedVoteData.yesVotingPower / totalVotingPower) * 100;
+                  processedVoteData.noPercentage = (processedVoteData.noVotingPower / totalVotingPower) * 100;
+                  processedVoteData.abstainPercentage = (processedVoteData.abstainVotingPower / totalVotingPower) * 100;
                 }
               }
-              
-              // Ensure we have voting power values for the display
-              voteData.yesVotingPower = parseFloat(voteData.yesVotingPower || voteData.yesVotes) || 0;
-              voteData.noVotingPower = parseFloat(voteData.noVotingPower || voteData.noVotes) || 0;
-              voteData.abstainVotingPower = parseFloat(voteData.abstainVotingPower || voteData.abstainVotes) || 0;
               
               return (
                 <div key={idx} className="p-4 border border-gray-200 rounded-lg">
@@ -252,30 +281,39 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
                   
                   {/* Vote percentages */}
                   <div className="flex justify-between text-sm mb-2">
-                    <span>Yes: {voteData.yesPercentage.toFixed(1)}%</span>
-                    <span>No: {voteData.noPercentage.toFixed(1)}%</span>
-                    <span>Abstain: {voteData.abstainPercentage.toFixed(1)}%</span>
+                    <span>Yes: {processedVoteData.yesPercentage.toFixed(1)}%</span>
+                    <span>No: {processedVoteData.noPercentage.toFixed(1)}%</span>
+                    <span>Abstain: {processedVoteData.abstainPercentage.toFixed(1)}%</span>
                   </div>
                   
                   {/* Vote bar */}
                   <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
                     <div className="flex h-full">
-                      <div className="bg-green-500 h-full" style={{ width: `${voteData.yesPercentage}%` }}></div>
-                      <div className="bg-red-500 h-full" style={{ width: `${voteData.noPercentage}%` }}></div>
-                      <div className="bg-gray-400 h-full" style={{ width: `${voteData.abstainPercentage}%` }}></div>
+                      <div 
+                        className="bg-green-500 h-full" 
+                        style={{ width: `${processedVoteData.yesPercentage}%` }}
+                      ></div>
+                      <div 
+                        className="bg-red-500 h-full" 
+                        style={{ width: `${processedVoteData.noPercentage}%` }}
+                      ></div>
+                      <div 
+                        className="bg-gray-400 h-full" 
+                        style={{ width: `${processedVoteData.abstainPercentage}%` }}
+                      ></div>
                     </div>
                   </div>
                   
-                  {/* Vote totals and voting power - Enhanced display */}
+                  {/* Voting power display */}
                   <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mt-2">
-                    <div>{Math.round(voteData.yesVotingPower)} JUST</div>
-                    <div className="text-center">{Math.round(voteData.noVotingPower)} JUST</div>
-                    <div className="text-right">{Math.round(voteData.abstainVotingPower)} JUST</div>
+                    <div>{Math.round(processedVoteData.yesVotingPower)} JUST</div>
+                    <div className="text-center">{Math.round(processedVoteData.noVotingPower)} JUST</div>
+                    <div className="text-right">{Math.round(processedVoteData.abstainVotingPower)} JUST</div>
                   </div>
                   
                   {/* Total voters count */}
                   <div className="text-xs text-gray-500 mt-1 text-right">
-                    Total voters: {voteData.totalVoters || 0}
+                    Total voters: {processedVoteData.totalVoters || 0}
                   </div>
                 </div>
               );
