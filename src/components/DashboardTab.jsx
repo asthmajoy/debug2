@@ -67,7 +67,7 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
             }
             
             console.log(`Fetching vote data for proposal #${proposal.id}`);
-            // Use the new getProposalVoteTotals function from the context
+            // Use the getProposalVoteTotals function from the context
             const data = await getProposalVoteTotals(proposal.id);
             
             // Process the data to ensure consistent format
@@ -76,6 +76,9 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
               yesVotes: parseFloat(data.yesVotes) || 0,
               noVotes: parseFloat(data.noVotes) || 0,
               abstainVotes: parseFloat(data.abstainVotes) || 0,
+              yesVotingPower: parseFloat(data.yesVotes || data.yesVotingPower) || 0,
+              noVotingPower: parseFloat(data.noVotes || data.noVotingPower) || 0,
+              abstainVotingPower: parseFloat(data.abstainVotes || data.abstainVotingPower) || 0,
               totalVoters: data.totalVoters || 0,
               
               // Store percentages based on voting power
@@ -86,6 +89,22 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
               // Add a timestamp to know when the data was fetched
               fetchedAt: Date.now()
             };
+            
+            // Calculate total voting power
+            processedData.totalVotingPower = processedData.yesVotingPower + 
+                                            processedData.noVotingPower + 
+                                            processedData.abstainVotingPower;
+            
+            // If percentages aren't provided, calculate them based on voting power
+            if (!data.yesPercentage && !data.noPercentage && !data.abstainPercentage) {
+              if (processedData.totalVotingPower > 0) {
+                processedData.yesPercentage = (processedData.yesVotingPower / processedData.totalVotingPower) * 100;
+                processedData.noPercentage = (processedData.noVotingPower / processedData.totalVotingPower) * 100;
+                processedData.abstainPercentage = (processedData.abstainVotingPower / processedData.totalVotingPower) * 100;
+              }
+            }
+            
+            console.log(`Processed vote data for proposal #${proposal.id}:`, processedData);
             
             // Cache the result with a reasonable TTL
             blockchainDataCache.set(cacheKey, processedData);
@@ -118,7 +137,7 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
     fetchVoteData();
     
     // Set up a polling interval to refresh vote data
-    const pollInterval = setInterval(fetchVoteData, 30000); // Every 30 seconds
+    const pollInterval = setInterval(fetchVoteData, 15000); // Every 15 seconds
     
     return () => {
       clearInterval(pollInterval);
@@ -162,11 +181,11 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
           <div className="space-y-3">
             <div>
               <p className="text-gray-500">Balance</p>
-              <p className="text-2xl font-bold">{formatToFiveDecimals(user.balance)} JUST</p>
+              <p className="text-2xl font-bold">{formatToFiveDecimals(user.balance)} JST</p>
             </div>
             <div>
               <p className="text-gray-500">Voting Power</p>
-              <p className="text-2xl font-bold">{formatToFiveDecimals(user.votingPower)} JUST</p>
+              <p className="text-2xl font-bold">{formatToFiveDecimals(user.votingPower)} JST</p>
             </div>
             <div className="mt-4">
               <button 
@@ -233,6 +252,9 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
                 yesVotes: parseFloat(proposal.yesVotes) || 0,
                 noVotes: parseFloat(proposal.noVotes) || 0,
                 abstainVotes: parseFloat(proposal.abstainVotes) || 0,
+                yesVotingPower: parseFloat(proposal.yesVotes) || 0,
+                noVotingPower: parseFloat(proposal.noVotes) || 0,
+                abstainVotingPower: parseFloat(proposal.abstainVotes) || 0,
                 totalVoters: 0,
                 yesPercentage: 0,
                 noPercentage: 0,
@@ -242,9 +264,9 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
               // Ensure we have all required properties with correct types
               const processedVoteData = {
                 // Original values from blockchain
-                yesVotingPower: parseFloat(voteData.yesVotes || 0),
-                noVotingPower: parseFloat(voteData.noVotes || 0),
-                abstainVotingPower: parseFloat(voteData.abstainVotes || 0),
+                yesVotingPower: parseFloat(voteData.yesVotingPower || voteData.yesVotes || 0),
+                noVotingPower: parseFloat(voteData.noVotingPower || voteData.noVotes || 0),
+                abstainVotingPower: parseFloat(voteData.abstainVotingPower || voteData.abstainVotes || 0),
                 totalVoters: voteData.totalVoters || 0,
                 
                 // Use existing percentages if available, otherwise calculate
@@ -253,12 +275,13 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
                 abstainPercentage: voteData.abstainPercentage || 0
               };
 
+              // Calculate total voting power
+              const totalVotingPower = processedVoteData.yesVotingPower + 
+                                       processedVoteData.noVotingPower + 
+                                       processedVoteData.abstainVotingPower;
+
               // If percentages aren't provided, calculate them based on voting power
               if (!voteData.yesPercentage && !voteData.noPercentage && !voteData.abstainPercentage) {
-                const totalVotingPower = processedVoteData.yesVotingPower + 
-                                        processedVoteData.noVotingPower + 
-                                        processedVoteData.abstainVotingPower;
-                
                 if (totalVotingPower > 0) {
                   processedVoteData.yesPercentage = (processedVoteData.yesVotingPower / totalVotingPower) * 100;
                   processedVoteData.noPercentage = (processedVoteData.noVotingPower / totalVotingPower) * 100;
@@ -306,9 +329,9 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
                   
                   {/* Voting power display */}
                   <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mt-2">
-                    <div>{Math.round(processedVoteData.yesVotingPower)} JUST</div>
-                    <div className="text-center">{Math.round(processedVoteData.noVotingPower)} JUST</div>
-                    <div className="text-right">{Math.round(processedVoteData.abstainVotingPower)} JUST</div>
+                    <div>{formatToFiveDecimals(processedVoteData.yesVotingPower)} JST</div>
+                    <div className="text-center">{formatToFiveDecimals(processedVoteData.noVotingPower)} JST</div>
+                    <div className="text-right">{formatToFiveDecimals(processedVoteData.abstainVotingPower)} JST</div>
                   </div>
                   
                   {/* Total voters count */}

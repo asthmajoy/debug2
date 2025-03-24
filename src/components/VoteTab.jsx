@@ -7,309 +7,156 @@ import { formatCountdown } from '../utils/formatters';
 import Loader from './Loader';
 import blockchainDataCache from '../utils/blockchainDataCache';
 
-const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVoteTotals, voting, account, governanceContract, provider, contractAddress }) => {
+const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, account, governanceContract, provider, contractAddress, getProposalVoteTotals }) => {
   const [voteFilter, setVoteFilter] = useState('active');
   const [votingPowers, setVotingPowers] = useState({});
   const [loading, setLoading] = useState(false);
   const [selectedProposal, setSelectedProposal] = useState(null);
   const [showModal, setShowModal] = useState(false);
   const [quorum, setQuorum] = useState(null);
-  const [proposalVotes, setProposalVotes] = useState({});
+  const [proposalVoteData, setProposalVoteData] = useState({});
   
   // Track locally which proposals the user has voted on and how
   const [votedProposals, setVotedProposals] = useState({});
   // Track pending transactions to show optimistic UI updates
   const [pendingVotes, setPendingVotes] = useState({});
   
-  // Function to get vote data from blockchain events - more reliable than contract methods in some cases
-  const getEventBasedVoteData = useCallback(async (proposalId) => {
-    try {
-      if (!governanceContract || !provider) {
-        console.error("Governance contract or provider not available");
-        return null;
-      }
-      
-      // Check cache first
-      const cacheKey = `eventVotes-${proposalId}`;
-      const cachedData = blockchainDataCache.get(cacheKey);
-      if (cachedData !== null) {
-        return cachedData;
-      }
-      
-      console.log(`Querying blockchain events for proposal #${proposalId}...`);
-      
-      // Get all VoteCast events for this proposal
-      const filter = governanceContract.filters.VoteCast(proposalId);
-      const events = await governanceContract.queryFilter(filter);
-      console.log(`Found ${events.length} VoteCast events for proposal #${proposalId}`);
-      
-      if (events.length === 0) {
-        return {
-          yesVotes: 0,
-          noVotes: 0,
-          abstainVotes: 0,
-          totalVotes: 0,
-          yesVotingPower: 0,
-          noVotingPower: 0,
-          abstainVotingPower: 0,
-          totalVotingPower: 0,
-          totalVoters: 0,
-          yesPercentage: 0,
-          noPercentage: 0,
-          abstainPercentage: 0
-        };
-      }
-      
-      // Use maps to track the latest vote for each voter
-      const voterVotes = new Map(); // address -> {type, power}
-      
-      // Process all events to build an accurate picture
-      for (const event of events) {
-        try {
-          const { voter, support, votingPower } = event.args;
-          const voterAddress = voter.toLowerCase();
-          const powerValue = parseFloat(ethers.utils.formatEther(votingPower));
-          
-          // Store or update this voter's vote (only keeping most recent)
-          voterVotes.set(voterAddress, {
-            type: Number(support),
-            power: powerValue
-          });
-        } catch (error) {
-          console.warn("Error processing vote event:", error);
-        }
-      }
-      
-      // Count total unique voters
-      const totalVoters = voterVotes.size;
-      
-      // Initialize vote counts
-      let votesByType = {0: 0, 1: 0, 2: 0}; // Count of voters
-      let votingPowerByType = {0: 0, 1: 0, 2: 0}; // Total voting power
-      
-      // Count votes by type
-      for (const [, voteData] of voterVotes.entries()) {
-        const { type, power } = voteData;
-        
-        // Count the voter (1 vote per person)
-        votesByType[type]++;
-        
-        // Add their voting power
-        votingPowerByType[type] += power;
-      }
-      
-      // Calculate totals
-      const totalVotes = votesByType[0] + votesByType[1] + votesByType[2]; // Total unique voters
-      const totalVotingPower = votingPowerByType[0] + votingPowerByType[1] + votingPowerByType[2]; // Total voting power
-      
-      // Calculate percentages based on voting power (not count)
-      const yesPercentage = totalVotingPower > 0 ? (votingPowerByType[1] / totalVotingPower) * 100 : 0;
-      const noPercentage = totalVotingPower > 0 ? (votingPowerByType[0] / totalVotingPower) * 100 : 0;
-      const abstainPercentage = totalVotingPower > 0 ? (votingPowerByType[2] / totalVotingPower) * 100 : 0;
-      
-      const result = {
-        yesVotes: votesByType[1],
-        noVotes: votesByType[0],
-        abstainVotes: votesByType[2],
-        totalVotes,
-        yesVotingPower: votingPowerByType[1],
-        noVotingPower: votingPowerByType[0],
-        abstainVotingPower: votingPowerByType[2],
-        totalVotingPower,
-        totalVoters,
-        yesPercentage,
-        noPercentage,
-        abstainPercentage,
-        source: 'events'
-      };
-      
-      // Cache the result
-      blockchainDataCache.set(cacheKey, result);
-      
-      return result;
-    } catch (error) {
-      console.error("Error querying blockchain events:", error);
-      return null;
-    }
-  }, [governanceContract, provider]);
-
-  // Function to fetch proposal vote data combining multiple sources
-  const fetchProposalVotes = useCallback(async (proposalId) => {
-    try {
-      if (!proposalId || !getProposalVoteTotals) {
-        return null;
-      }
-      
-      console.log(`Fetching vote data for proposal #${proposalId} from blockchain`);
-      
-      // Use the context function to get vote data - this pulls from blockchain
-      let blockchainData = await getProposalVoteTotals(proposalId);
-      console.log(`Got vote data from blockchain for proposal #${proposalId}:`, blockchainData);
-      
-      // Check if we got valid data
-      if (!blockchainData || (parseFloat(blockchainData.yesVotes) === 0 && 
-                             parseFloat(blockchainData.noVotes) === 0 && 
-                             parseFloat(blockchainData.abstainVotes) === 0 && 
-                             blockchainData.totalVoters === 0)) {
-        
-        // If no data from context function, try fallback method
-        try {
-          blockchainData = await getEventBasedVoteData(proposalId);
-          console.log(`Got vote data from events for proposal #${proposalId}:`, blockchainData);
-        } catch (error) {
-          console.warn(`Error getting event data for proposal #${proposalId}:`, error);
-        }
-      }
-      
-      // If we still don't have data, return null
-      if (!blockchainData) {
-        console.warn(`Could not get blockchain data for proposal #${proposalId}`);
-        return null;
-      }
-      
-      // Add pending votes (optimistic UI for this user's recent votes)
-      let voteData = {...blockchainData};
-      const pendingVote = pendingVotes[proposalId];
-      
-      // Only apply pending votes if they're recent (less than 1 minute old) and not yet confirmed
-      if (pendingVote && (Date.now() - pendingVote.timestamp) < 60000) {
-        console.log(`Applying pending vote for proposal #${proposalId}:`, pendingVote);
-        
-        // Only apply the pending vote if it's not already counted in blockchain data
-        if (!votedProposals[proposalId] || blockchainData.totalVoters === 0) {
-          const userVotingPower = parseFloat(pendingVote.votingPower) || 1;
-          
-          // Add the pending vote to the appropriate category
-          if (pendingVote.voteType === VOTE_TYPES.FOR) {
-            voteData.yesVotes = (parseFloat(voteData.yesVotes) + userVotingPower).toString();
-            voteData.yesVotingPower = (parseFloat(voteData.yesVotingPower || voteData.yesVotes) + userVotingPower).toString();
-          } else if (pendingVote.voteType === VOTE_TYPES.AGAINST) {
-            voteData.noVotes = (parseFloat(voteData.noVotes) + userVotingPower).toString();
-            voteData.noVotingPower = (parseFloat(voteData.noVotingPower || voteData.noVotes) + userVotingPower).toString();
-          } else if (pendingVote.voteType === VOTE_TYPES.ABSTAIN) {
-            voteData.abstainVotes = (parseFloat(voteData.abstainVotes) + userVotingPower).toString();
-            voteData.abstainVotingPower = (parseFloat(voteData.abstainVotingPower || voteData.abstainVotes) + userVotingPower).toString();
-          }
-          
-          // Update totals
-          voteData.totalVoters = (voteData.totalVoters || 0) + 1;
-          voteData.totalVotingPower = (parseFloat(voteData.totalVotingPower || "0") + userVotingPower).toString();
-          
-          // Recalculate percentages
-          const totalVotingPower = parseFloat(voteData.totalVotingPower) || 1;
-          voteData.yesPercentage = (parseFloat(voteData.yesVotingPower || voteData.yesVotes) / totalVotingPower) * 100;
-          voteData.noPercentage = (parseFloat(voteData.noVotingPower || voteData.noVotes) / totalVotingPower) * 100;
-          voteData.abstainPercentage = (parseFloat(voteData.abstainVotingPower || voteData.abstainVotes) / totalVotingPower) * 100;
-          
-          // Mark as including optimistic updates
-          voteData.includesPending = true;
-        }
-      }
-      
-      return voteData;
-    } catch (error) {
-      console.error(`Error fetching votes for proposal #${proposalId}:`, error);
-      return null;
-    }
-  }, [getProposalVoteTotals, getEventBasedVoteData, pendingVotes, votedProposals]);
-
-  // Poll for updated vote data with exponential backoff after a vote
-  const refreshProposalWithBackoff = useCallback(async (proposalId) => {
-    // Retry multiple times with increasing delays to handle blockchain latency
-    let currentDelay = 2000; // Start with 2 seconds
-    const maxDelay = 10000; // Max delay of 10 seconds
-    const maxRetries = 5;
+  // Format numbers for display - MATCHING DASHBOARD
+  const formatNumberDisplay = (value) => {
+    if (value === undefined || value === null) return "0";
     
-    for (let retry = 0; retry < maxRetries; retry++) {
-      await new Promise(resolve => setTimeout(resolve, currentDelay));
-      
-      // Try to fetch the latest data
-      try {
-        const freshData = await fetchProposalVotes(proposalId);
-        if (freshData) {
-          console.log(`Refreshed data for proposal #${proposalId} (retry ${retry+1}):`, freshData);
-          setProposalVotes(prev => ({
-            ...prev,
-            [proposalId]: freshData
-          }));
-          
-          // If we received data with the total voters > 0, we can stop retrying
-          if (freshData.totalVoters > 0) {
-            console.log(`Received valid data with ${freshData.totalVoters} voters - stopping retries`);
-            break;
-          }
-        }
-      } catch (err) {
-        console.warn(`Error refreshing proposal #${proposalId} (retry ${retry+1}):`, err);
-      }
-      
-      // Increase delay for next attempt (exponential backoff)
-      currentDelay = Math.min(currentDelay * 1.5, maxDelay);
-    }
-  }, [fetchProposalVotes]);
-
-  // Function to refresh all proposal vote data
-  const refreshAllProposals = useCallback(async () => {
-    if (!proposals.length) return;
+    // Handle string inputs
+    const numValue = typeof value === 'string' ? parseFloat(value) : value;
     
-    setLoading(true);
-    try {
-      console.log("Refreshing all proposal vote data...");
+    // If it's NaN or not a number, return "0"
+    if (isNaN(numValue)) return "0";
+    
+    // For whole numbers, don't show decimals
+    if (Math.abs(numValue - Math.round(numValue)) < 0.00001) {
+      return numValue.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    }
+    
+    // For decimal numbers, limit to 2 decimal places
+    return numValue.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2
+    });
+  };
+  
+  // Format token values to 5 decimal places - MATCHING DASHBOARD
+  const formatToFiveDecimals = (value) => {
+    if (value === undefined || value === null) return "0.00000";
+    
+    // Handle string inputs
+    const numValue = typeof value === 'string' ? parseFloat(value) : value;
+    
+    // If it's NaN or not a number, return "0.00000"
+    if (isNaN(numValue)) return "0.00000";
+    
+    // Return with exactly 5 decimal places
+    return numValue.toFixed(5);
+  };
+  
+  // Fetch vote data for all proposals - EXACTLY MATCHING DASHBOARD APPROACH
+  useEffect(() => {
+    const fetchVoteData = async () => {
+      if (!getProposalVoteTotals || !proposals || proposals.length === 0) return;
       
-      // Fetch data for all proposals
+      console.log("Dashboard fetching vote data for all active proposals");
+      const voteData = {};
+      
+      // Process proposals in parallel for better performance
       const results = await Promise.allSettled(
         proposals.map(async (proposal) => {
           try {
-            return { 
-              id: proposal.id, 
-              data: await fetchProposalVotes(proposal.id)
+            // Check if cached data is available first
+            const cacheKey = `dashboard-votes-${proposal.id}`;
+            const cachedData = blockchainDataCache.get(cacheKey);
+            if (cachedData !== null) {
+              return {
+                id: proposal.id,
+                data: cachedData
+              };
+            }
+            
+            console.log(`Fetching vote data for proposal #${proposal.id}`);
+            // Use the getProposalVoteTotals function from the context
+            const data = await getProposalVoteTotals(proposal.id);
+            
+            // Process the data to ensure consistent format - EXACTLY MATCHING DASHBOARD
+            const processedData = {
+              // Note: In the contract, yesVotes/noVotes/abstainVotes are actually voting power values
+              yesVotes: parseFloat(data.yesVotes) || 0,
+              noVotes: parseFloat(data.noVotes) || 0,
+              abstainVotes: parseFloat(data.abstainVotes) || 0,
+              yesVotingPower: parseFloat(data.yesVotes || data.yesVotingPower) || 0,
+              noVotingPower: parseFloat(data.noVotes || data.noVotingPower) || 0,
+              abstainVotingPower: parseFloat(data.abstainVotes || data.abstainVotingPower) || 0,
+              totalVoters: parseInt(data.totalVoters) || 0,
+              
+              // Store percentages based on voting power
+              yesPercentage: data.yesPercentage || 0,
+              noPercentage: data.noPercentage || 0,
+              abstainPercentage: data.abstainPercentage || 0,
+              
+              // Add a timestamp to know when the data was fetched
+              fetchedAt: Date.now()
+            };
+            
+            // Calculate total voting power
+            processedData.totalVotingPower = processedData.yesVotingPower + 
+                                            processedData.noVotingPower + 
+                                            processedData.abstainVotingPower;
+            
+            // If percentages aren't provided, calculate them based on voting power
+            if (!data.yesPercentage && !data.noPercentage && !data.abstainPercentage) {
+              if (processedData.totalVotingPower > 0) {
+                processedData.yesPercentage = (processedData.yesVotingPower / processedData.totalVotingPower) * 100;
+                processedData.noPercentage = (processedData.noVotingPower / processedData.totalVotingPower) * 100;
+                processedData.abstainPercentage = (processedData.abstainVotingPower / processedData.totalVotingPower) * 100;
+              }
+            }
+            
+            console.log(`Processed vote data for proposal #${proposal.id}:`, processedData);
+            
+            // Cache the result with a reasonable TTL
+            blockchainDataCache.set(cacheKey, processedData, 30); // Cache for 30 seconds
+            
+            return {
+              id: proposal.id,
+              data: processedData
             };
           } catch (error) {
-            console.error(`Error refreshing proposal #${proposal.id}:`, error);
-            return { id: proposal.id, data: null };
+            console.error(`Error fetching vote data for proposal ${proposal.id}:`, error);
+            return {
+              id: proposal.id,
+              data: null
+            };
           }
         })
       );
       
-      // Update state with any successful results
-      const newVotes = {...proposalVotes};
-      let hasUpdates = false;
-      
+      // Collect successful results
       results.forEach(result => {
         if (result.status === 'fulfilled' && result.value && result.value.data) {
-          newVotes[result.value.id] = result.value.data;
-          hasUpdates = true;
+          voteData[result.value.id] = result.value.data;
         }
       });
       
-      if (hasUpdates) {
-        console.log("Updating proposalVotes state with new data");
-        setProposalVotes(newVotes);
-      }
-    } catch (error) {
-      console.error("Error refreshing all proposals:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, [proposals, fetchProposalVotes, proposalVotes]);
-
-  // Poll for vote data on interval
-  useEffect(() => {
-    // Don't poll if there are no proposals
-    if (!proposals.length) return;
+      console.log("Setting proposalVoteData state with:", voteData);
+      setProposalVoteData(voteData);
+    };
     
-    // Initial load
-    refreshAllProposals();
+    // Initial fetch
+    fetchVoteData();
     
-    // Setup polling interval - every 15 seconds to avoid overwhelming the RPC
-    const pollInterval = setInterval(() => {
-      refreshAllProposals();
-    }, 15000);
+    // Set up a polling interval to refresh vote data - every 15 seconds as requested
+    const pollInterval = setInterval(fetchVoteData, 15000);
     
     return () => {
       clearInterval(pollInterval);
     };
-  }, [proposals, refreshAllProposals]);
+  }, [proposals, getProposalVoteTotals]);
 
   // Fetch voting powers for each proposal
   useEffect(() => {
@@ -357,10 +204,78 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
         if (proposal.votedNo) voteType = VOTE_TYPES.AGAINST;
         
         voted[proposal.id] = voteType;
+        
+        console.log(`User has voted on proposal #${proposal.id} with vote type: ${voteType}`);
       }
     });
     setVotedProposals(voted);
-  }, [proposals]);
+    
+    // Force refresh vote data when proposals change or when user votes on something
+    if (getProposalVoteTotals && proposals.length > 0) {
+      console.log("Triggering vote data refresh due to proposal change or new votes");
+      // This will ensure we reload vote data when proposals change
+      const refreshVoteData = async () => {
+        setLoading(true);
+        try {
+          const updatedVoteData = {};
+          
+          for (const proposal of proposals) {
+            try {
+              const data = await getProposalVoteTotals(proposal.id);
+              if (data) {
+                // Process the data consistently with Dashboard approach
+                const processedData = {
+                  yesVotes: parseFloat(data.yesVotes) || 0,
+                  noVotes: parseFloat(data.noVotes) || 0,
+                  abstainVotes: parseFloat(data.abstainVotes) || 0,
+                  yesVotingPower: parseFloat(data.yesVotes || data.yesVotingPower) || 0,
+                  noVotingPower: parseFloat(data.noVotes || data.noVotingPower) || 0,
+                  abstainVotingPower: parseFloat(data.abstainVotes || data.abstainVotingPower) || 0,
+                  totalVoters: parseInt(data.totalVoters) || 0,
+                  fetchedAt: Date.now()
+                };
+                
+                // Calculate total voting power
+                processedData.totalVotingPower = 
+                  processedData.yesVotingPower + 
+                  processedData.noVotingPower + 
+                  processedData.abstainVotingPower;
+                
+                // Calculate percentages
+                if (processedData.totalVotingPower > 0) {
+                  processedData.yesPercentage = (processedData.yesVotingPower / processedData.totalVotingPower) * 100;
+                  processedData.noPercentage = (processedData.noVotingPower / processedData.totalVotingPower) * 100;
+                  processedData.abstainPercentage = (processedData.abstainVotingPower / processedData.totalVotingPower) * 100;
+                } else {
+                  processedData.yesPercentage = 0;
+                  processedData.noPercentage = 0;
+                  processedData.abstainPercentage = 0;
+                }
+                
+                updatedVoteData[proposal.id] = processedData;
+                
+                // Update the cache too
+                blockchainDataCache.set(`dashboard-votes-${proposal.id}`, processedData, 30);
+              }
+            } catch (error) {
+              console.error(`Error refreshing vote data for proposal ${proposal.id}:`, error);
+            }
+          }
+          
+          setProposalVoteData(prev => ({
+            ...prev,
+            ...updatedVoteData
+          }));
+        } catch (error) {
+          console.error("Error refreshing vote data:", error);
+        } finally {
+          setLoading(false);
+        }
+      };
+      
+      refreshVoteData();
+    }
+  }, [proposals, getProposalVoteTotals, VOTE_TYPES]);
   
   // Fetch quorum from governance contract
   useEffect(() => {
@@ -429,7 +344,13 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
     return null;
   }, [votedProposals]);
 
-  // Function to submit a vote with better error handling
+  // Determine if a proposal has a pending vote
+  const hasPendingVote = useCallback((proposalId) => {
+    return pendingVotes[proposalId] !== undefined && 
+           (Date.now() - pendingVotes[proposalId].timestamp) < 60000; // Consider pending if less than 1 minute old
+  }, [pendingVotes]);
+
+  // Function to submit a vote
   const submitVote = async (proposalId, support) => {
     try {
       // Find the proposal in the list
@@ -474,12 +395,12 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
         [proposalId]: pendingVote
       }));
       
-      // Update proposal votes with optimistic data before blockchain confirms
-      const currentVotes = proposalVotes[proposalId] || {
+      // Create optimistic update for UI - USING DASHBOARD APPROACH
+      // Get the current vote data or create a new empty object if none exists
+      const currentVoteData = proposalVoteData[proposalId] || {
         yesVotes: 0,
         noVotes: 0,
         abstainVotes: 0,
-        totalVotes: 0,
         yesVotingPower: 0,
         noVotingPower: 0,
         abstainVotingPower: 0,
@@ -487,44 +408,56 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
         totalVoters: 0,
         yesPercentage: 0,
         noPercentage: 0,
-        abstainPercentage: 0
+        abstainPercentage: 0,
       };
       
-      // Create optimistic update that adds this vote to existing data
-      const optimisticVotes = {...currentVotes};
+      // Create a deep copy to avoid mutating the original
+      const optimisticVoteData = JSON.parse(JSON.stringify(currentVoteData));
       
-      // Only add our vote if we haven't already voted (according to blockchain data)
-      // We don't want to double-count votes
+      // Only add if we haven't already voted
       if (!hasUserVoted(proposal)) {
+        console.log(`Adding optimistic vote: type=${support}, power=${userVotingPower}`);
+        
+        // Update vote counts based on vote type
         if (support === VOTE_TYPES.FOR) {
-          optimisticVotes.yesVotes = parseFloat(optimisticVotes.yesVotes || 0) + 1;
-          optimisticVotes.yesVotingPower = parseFloat(optimisticVotes.yesVotingPower || 0) + userVotingPower;
+          optimisticVoteData.yesVotes += 1;
+          optimisticVoteData.yesVotingPower += userVotingPower;
         } else if (support === VOTE_TYPES.AGAINST) {
-          optimisticVotes.noVotes = parseFloat(optimisticVotes.noVotes || 0) + 1;
-          optimisticVotes.noVotingPower = parseFloat(optimisticVotes.noVotingPower || 0) + userVotingPower;
+          optimisticVoteData.noVotes += 1;
+          optimisticVoteData.noVotingPower += userVotingPower;
         } else {
-          optimisticVotes.abstainVotes = parseFloat(optimisticVotes.abstainVotes || 0) + 1;
-          optimisticVotes.abstainVotingPower = parseFloat(optimisticVotes.abstainVotingPower || 0) + userVotingPower;
+          optimisticVoteData.abstainVotes += 1;
+          optimisticVoteData.abstainVotingPower += userVotingPower;
         }
         
-        // Update totals
-        optimisticVotes.totalVotes = parseFloat(optimisticVotes.totalVotes || 0) + 1;
-        optimisticVotes.totalVoters = (optimisticVotes.totalVoters || 0) + 1;
-        optimisticVotes.totalVotingPower = parseFloat(optimisticVotes.totalVotingPower || 0) + userVotingPower;
+        // Update total voters
+        optimisticVoteData.totalVoters = (optimisticVoteData.totalVoters || 0) + 1;
         
-        // Recalculate percentages
-        const totalVotingPower = optimisticVotes.totalVotingPower || 1;
-        optimisticVotes.yesPercentage = (optimisticVotes.yesVotingPower / totalVotingPower) * 100;
-        optimisticVotes.noPercentage = (optimisticVotes.noVotingPower / totalVotingPower) * 100;
-        optimisticVotes.abstainPercentage = (optimisticVotes.abstainVotingPower / totalVotingPower) * 100;
+        // Recalculate total voting power
+        optimisticVoteData.totalVotingPower = 
+          optimisticVoteData.yesVotingPower + 
+          optimisticVoteData.noVotingPower + 
+          optimisticVoteData.abstainVotingPower;
         
-        // Mark as optimistic update
-        optimisticVotes.isOptimistic = true;
+        console.log("Updated total voting power:", optimisticVoteData.totalVotingPower);
         
-        // Update the UI immediately (optimistically)
-        setProposalVotes(prev => ({
+        // Recalculate percentages using Dashboard approach
+        if (optimisticVoteData.totalVotingPower > 0) {
+          optimisticVoteData.yesPercentage = (optimisticVoteData.yesVotingPower / optimisticVoteData.totalVotingPower) * 100;
+          optimisticVoteData.noPercentage = (optimisticVoteData.noVotingPower / optimisticVoteData.totalVotingPower) * 100;
+          optimisticVoteData.abstainPercentage = (optimisticVoteData.abstainVotingPower / optimisticVoteData.totalVotingPower) * 100;
+          
+          console.log("Updated percentages:", {
+            yes: optimisticVoteData.yesPercentage,
+            no: optimisticVoteData.noPercentage,
+            abstain: optimisticVoteData.abstainPercentage
+          });
+        }
+        
+        // Update vote data with optimistic update
+        setProposalVoteData(prev => ({
           ...prev,
-          [proposalId]: optimisticVotes
+          [proposalId]: optimisticVoteData
         }));
       }
       
@@ -532,14 +465,11 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
       const result = await castVote(proposalId, support);
       console.log("Vote transaction confirmed:", result);
       
-      // Update the voted proposals state (local tracking of user votes)
+      // Update the voted proposals state
       setVotedProposals(prev => ({
         ...prev,
         [proposalId]: support
       }));
-      
-      // Start polling with backoff to get the latest data after our vote
-      refreshProposalWithBackoff(proposalId);
       
       return result;
     } catch (error) {
@@ -551,9 +481,6 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
         delete updated[proposalId];
         return updated;
       });
-      
-      // Refresh the vote data to ensure UI is correct
-      refreshProposalWithBackoff(proposalId);
       
       // Propagate the error
       throw error;
@@ -568,126 +495,92 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
     return '';
   };
 
-  // Function to calculate vote data for display 
+  // Get vote data for a proposal - EXACTLY MATCHING DASHBOARD APPROACH
   const getVoteData = useCallback((proposal) => {
-    // Get data from the proposalVotes state
-    const voteData = proposalVotes[proposal.id];
+    // First check if we have data in the state
+    const voteData = proposalVoteData[proposal.id];
     
-    // If we have vote data, return it with proper typing
     if (voteData) {
-      // Ensure all properties have the right type
-      return {
-        // Note: In the contract, yesVotes/noVotes/abstainVotes represent voting power
-        yesVotes: parseFloat(voteData.yesVotes) || 0,
-        noVotes: parseFloat(voteData.noVotes) || 0,
-        abstainVotes: parseFloat(voteData.abstainVotes) || 0,
-        
-        // Store voting power explicitly (these values are the same as the votes values)
-        yesVotingPower: parseFloat(voteData.yesVotingPower || voteData.yesVotes) || 0,
-        noVotingPower: parseFloat(voteData.noVotingPower || voteData.noVotes) || 0,
-        abstainVotingPower: parseFloat(voteData.abstainVotingPower || voteData.abstainVotes) || 0,
-        
-        // Total votes and voting power
-        totalVotes: voteData.totalVoters || 0,
-        totalVotingPower: parseFloat(voteData.totalVotingPower) || 
-          parseFloat(voteData.yesVotes) + parseFloat(voteData.noVotes) + parseFloat(voteData.abstainVotes) || 0,
-        
-        // Number of unique voters
-        totalVoters: voteData.totalVoters || 0,
-        
-        // Percentages based on voting power
-        yesPercentage: voteData.yesPercentage || 0,
-        noPercentage: voteData.noPercentage || 0,
-        abstainPercentage: voteData.abstainPercentage || 0,
-        
-        // Additional metadata
-        source: voteData.source || 'state',
-        isPending: voteData.includesPending || false
-      };
+      return voteData;
     }
     
-    // If we have a pending vote for this proposal, create synthetic data
-    const pendingVote = pendingVotes[proposal.id];
-    if (pendingVote) {
-      const userVotingPower = parseFloat(pendingVote.votingPower) || 1;
-      
-      // Create synthetic data based on the pending vote
-      return {
-        yesVotes: pendingVote.voteType === VOTE_TYPES.FOR ? 1 : 0,
-        noVotes: pendingVote.voteType === VOTE_TYPES.AGAINST ? 1 : 0,
-        abstainVotes: pendingVote.voteType === VOTE_TYPES.ABSTAIN ? 1 : 0,
-        totalVotes: 1,
-        yesVotingPower: pendingVote.voteType === VOTE_TYPES.FOR ? userVotingPower : 0,
-        noVotingPower: pendingVote.voteType === VOTE_TYPES.AGAINST ? userVotingPower : 0,
-        abstainVotingPower: pendingVote.voteType === VOTE_TYPES.ABSTAIN ? userVotingPower : 0,
-        totalVotingPower: userVotingPower,
-        totalVoters: 1,
-        yesPercentage: pendingVote.voteType === VOTE_TYPES.FOR ? 100 : 0,
-        noPercentage: pendingVote.voteType === VOTE_TYPES.AGAINST ? 100 : 0,
-        abstainPercentage: pendingVote.voteType === VOTE_TYPES.ABSTAIN ? 100 : 0,
-        isPending: true,
-        source: 'pending'
-      };
-    }
-    
-    // If the proposal has embedded vote data, use that (fallback)
-    if (proposal.yesVotes !== undefined || proposal.noVotes !== undefined || proposal.abstainVotes !== undefined) {
-      const yesVotes = parseFloat(proposal.yesVotes) || 0;
-      const noVotes = parseFloat(proposal.noVotes) || 0;
-      const abstainVotes = parseFloat(proposal.abstainVotes) || 0;
-      const totalVotingPower = yesVotes + noVotes + abstainVotes;
-      
-      return {
-        yesVotes,
-        noVotes,
-        abstainVotes,
-        yesVotingPower: yesVotes,
-        noVotingPower: noVotes,
-        abstainVotingPower: abstainVotes,
-        totalVotes: totalVotingPower > 0 ? Math.round(totalVotingPower) : 0,
-        totalVotingPower,
-        totalVoters: proposal.totalVoters || 0,
-        yesPercentage: totalVotingPower > 0 ? (yesVotes / totalVotingPower) * 100 : 0,
-        noPercentage: totalVotingPower > 0 ? (noVotes / totalVotingPower) * 100 : 0,
-        abstainPercentage: totalVotingPower > 0 ? (abstainVotes / totalVotingPower) * 100 : 0,
-        source: 'proposal'
-      };
-    }
-    
-    // Return empty data if nothing else available
-    return {
+    // If not in state, create synthetic data using proposal data
+    // This ensures we show something even before the blockchain data loads
+    // EXACTLY MATCHING DASHBOARD APPROACH
+    const syntheticData = {
       yesVotes: 0,
       noVotes: 0,
       abstainVotes: 0,
-      totalVotes: 0,
-      yesVotingPower: 0,
-      noVotingPower: 0,
-      abstainVotingPower: 0,
-      totalVotingPower: 0,
+      yesVotingPower: parseFloat(proposal.yesVotes) || 0,
+      noVotingPower: parseFloat(proposal.noVotes) || 0,
+      abstainVotingPower: parseFloat(proposal.abstainVotes) || 0,
       totalVoters: 0,
       yesPercentage: 0,
       noPercentage: 0,
-      abstainPercentage: 0,
-      source: 'empty'
+      abstainPercentage: 0
     };
-  }, [proposalVotes, pendingVotes, VOTE_TYPES]);
-
-  // Render vote percentage bar based on voting power
+    
+    // Calculate total voting power
+    const totalVotingPower = syntheticData.yesVotingPower + 
+                             syntheticData.noVotingPower + 
+                             syntheticData.abstainVotingPower;
+    
+    syntheticData.totalVotingPower = totalVotingPower;
+    
+    // Calculate percentages if there's any voting power
+    if (totalVotingPower > 0) {
+      syntheticData.yesPercentage = (syntheticData.yesVotingPower / totalVotingPower) * 100;
+      syntheticData.noPercentage = (syntheticData.noVotingPower / totalVotingPower) * 100;
+      syntheticData.abstainPercentage = (syntheticData.abstainVotingPower / totalVotingPower) * 100;
+    }
+    
+    // If the user has voted but totals are still 0, enhance the synthetic data
+    // This is important when votes haven't been indexed yet but we know the user voted
+    if ((totalVotingPower === 0 || syntheticData.totalVoters === 0) && hasUserVoted(proposal)) {
+      const voteType = getUserVoteType(proposal);
+      const approxVotingPower = parseFloat(votingPowers[proposal.id] || "0.6");
+      
+      if (voteType === VOTE_TYPES.FOR) {
+        syntheticData.yesVotes = 1;
+        syntheticData.yesVotingPower = approxVotingPower;
+        syntheticData.totalVoters = 1;
+        syntheticData.yesPercentage = 100;
+        syntheticData.totalVotingPower = approxVotingPower;
+      } else if (voteType === VOTE_TYPES.AGAINST) {
+        syntheticData.noVotes = 1;
+        syntheticData.noVotingPower = approxVotingPower;
+        syntheticData.totalVoters = 1;
+        syntheticData.noPercentage = 100;
+        syntheticData.totalVotingPower = approxVotingPower;
+      } else if (voteType === VOTE_TYPES.ABSTAIN) {
+        syntheticData.abstainVotes = 1;
+        syntheticData.abstainVotingPower = approxVotingPower;
+        syntheticData.totalVoters = 1;
+        syntheticData.abstainPercentage = 100;
+        syntheticData.totalVotingPower = approxVotingPower;
+      }
+    }
+    
+    return syntheticData;
+  }, [proposalVoteData, hasUserVoted, getUserVoteType, votingPowers, VOTE_TYPES]);
+  
+  // Render vote percentage bar - CONSISTENT WITH DASHBOARD
   const renderVoteBar = useCallback((proposal) => {
     const voteData = getVoteData(proposal);
+    const totalVotingPower = voteData.totalVotingPower || 0;
     
-    // If there's no voting power, show empty bar
-    if (voteData.totalVotingPower <= 0) {
+    if (totalVotingPower <= 0) {
+      // Default empty bar if no votes
       return (
-        <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+        <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
           <div className="h-full w-full bg-gray-300"></div>
         </div>
       );
     }
     
-    // Show vote percentages with color coding
+    // Show vote percentages with color coding - SAME AS DASHBOARD
     return (
-      <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+      <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
         <div className="flex h-full">
           <div 
             className="bg-green-500 h-full" 
@@ -706,36 +599,129 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
     );
   }, [getVoteData]);
 
-  // Determine if a proposal has a pending vote
-  const hasPendingVote = useCallback((proposalId) => {
-    return pendingVotes[proposalId] !== undefined && 
-           (Date.now() - pendingVotes[proposalId].timestamp) < 60000; // Consider pending if less than 1 minute old
-  }, [pendingVotes]);
+  // Debug function to see what data we're getting
+  const debugVoteData = () => {
+    console.log("Current proposalVoteData state:", proposalVoteData);
+    
+    // Extract some key data for the first proposal
+    if (proposals && proposals.length > 0) {
+      const firstProposal = proposals[0];
+      const data = proposalVoteData[firstProposal.id];
+      
+      console.log(`Detailed data for Proposal #${firstProposal.id}:`, {
+        inState: !!data,
+        yesVotes: data ? data.yesVotes : 'N/A',
+        noVotes: data ? data.noVotes : 'N/A',
+        abstainVotes: data ? data.abstainVotes : 'N/A',
+        yesVotingPower: data ? data.yesVotingPower : 'N/A',
+        noVotingPower: data ? data.noVotingPower : 'N/A',
+        abstainVotingPower: data ? data.abstainVotingPower : 'N/A',
+        totalVoters: data ? data.totalVoters : 'N/A',
+        totalVotingPower: data ? data.totalVotingPower : 'N/A',
+      });
+    }
+  };
+
+  // Trigger a manual refresh of vote data
+  const refreshAllVoteData = async () => {
+    if (!getProposalVoteTotals || !proposals || proposals.length === 0) return;
+    
+    console.log("Manually refreshing all vote data");
+    setLoading(true);
+    
+    try {
+      const updatedVoteData = {};
+      
+      for (const proposal of proposals) {
+        try {
+          const data = await getProposalVoteTotals(proposal.id);
+          if (data) {
+            console.log(`Raw vote data for proposal #${proposal.id}:`, data);
+            
+            // Process the data consistently with Dashboard approach
+            const processedData = {
+              yesVotes: parseFloat(data.yesVotes) || 0,
+              noVotes: parseFloat(data.noVotes) || 0,
+              abstainVotes: parseFloat(data.abstainVotes) || 0,
+              yesVotingPower: parseFloat(data.yesVotes || data.yesVotingPower) || 0,
+              noVotingPower: parseFloat(data.noVotes || data.noVotingPower) || 0,
+              abstainVotingPower: parseFloat(data.abstainVotes || data.abstainVotingPower) || 0,
+              totalVoters: parseInt(data.totalVoters) || 0,
+              fetchedAt: Date.now()
+            };
+            
+            // Calculate total voting power
+            processedData.totalVotingPower = 
+              processedData.yesVotingPower + 
+              processedData.noVotingPower + 
+              processedData.abstainVotingPower;
+            
+            // Calculate percentages
+            if (processedData.totalVotingPower > 0) {
+              processedData.yesPercentage = (processedData.yesVotingPower / processedData.totalVotingPower) * 100;
+              processedData.noPercentage = (processedData.noVotingPower / processedData.totalVotingPower) * 100;
+              processedData.abstainPercentage = (processedData.abstainVotingPower / processedData.totalVotingPower) * 100;
+            } else {
+              processedData.yesPercentage = 0;
+              processedData.noPercentage = 0;
+              processedData.abstainPercentage = 0;
+            }
+            
+            console.log(`Processed vote data for proposal #${proposal.id}:`, processedData);
+            
+            updatedVoteData[proposal.id] = processedData;
+            
+            // Update the cache too
+            blockchainDataCache.set(`dashboard-votes-${proposal.id}`, processedData, 30);
+          }
+        } catch (error) {
+          console.error(`Error refreshing vote data for proposal ${proposal.id}:`, error);
+        }
+      }
+      
+      setProposalVoteData(prev => ({
+        ...prev,
+        ...updatedVoteData
+      }));
+    } catch (error) {
+      console.error("Error in manual refresh:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div>
-      <div className="mb-6">
-        <h2 className="text-xl font-semibold">Vote</h2>
+      <div className="mb-8">
+        <h2 className="text-2xl font-semibold">Vote</h2>
         <p className="text-gray-500">Cast your votes on active proposals</p>
       </div>
       
       {/* Filter options */}
-      <div className="bg-white p-4 rounded-lg shadow mb-6">
-        <div className="flex flex-wrap gap-2">
+      <div className="bg-white p-6 rounded-lg shadow mb-8">
+        <div className="flex flex-wrap gap-3">
           {['active', 'voted', 'all'].map(filter => (
             <button
               key={filter}
-              className={`px-3 py-1 rounded-full text-sm ${voteFilter === filter ? 'bg-indigo-100 text-indigo-800' : 'bg-gray-100 text-gray-800'}`}
+              className={`px-4 py-2 rounded-full text-sm ${voteFilter === filter ? 'bg-indigo-100 text-indigo-800 font-medium' : 'bg-gray-100 text-gray-800'}`}
               onClick={() => setVoteFilter(filter)}
             >
               {filter.charAt(0).toUpperCase() + filter.slice(1)}
             </button>
           ))}
+          
+          {/* Debug buttons - remove in production */}
+          <button
+            className="ml-auto px-4 py-2 rounded-full text-sm bg-blue-100 text-blue-800"
+            onClick={() => refreshAllVoteData()}
+          >
+            Refresh Data
+          </button>
         </div>
       </div>
       
       {/* Voting cards */}
-      <div className="space-y-6">
+      <div className="space-y-8">
         {voting.loading || loading ? (
           <div className="flex justify-center py-8">
             <Loader size="large" text="Loading proposals..." />
@@ -755,24 +741,24 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
             const isPending = hasPendingVote(proposal.id);
             
             return (
-              <div key={idx} className="bg-white p-6 rounded-lg shadow">
-                <div className="flex justify-between items-start mb-3">
+              <div key={idx} className="bg-white p-8 rounded-lg shadow-md">
+                <div className="flex justify-between items-start mb-5">
                   <div>
-                    <h3 className="text-lg font-medium">{proposal.title}</h3>
-                    <p className="text-xs text-gray-500">Proposal #{proposal.id}</p>
+                    <h3 className="text-xl font-medium mb-1">{proposal.title}</h3>
+                    <p className="text-sm text-gray-500">Proposal #{proposal.id}</p>
                   </div>
-                  <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-1 rounded-full flex items-center">
-                    <Clock className="w-3 h-3 mr-1" />
+                  <span className="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full flex items-center">
+                    <Clock className="w-4 h-4 mr-1" />
                     {formatCountdown(proposal.deadline)}
                   </span>
                 </div>
                 
-                <p className="text-gray-700 mb-4">{proposal.description.substring(0, 150)}...</p>
+                <p className="text-gray-700 mb-6 text-base">{proposal.description.substring(0, 200)}...</p>
                 
                 {/* Vote data display */}
-                <div className="mb-4">
+                <div className="mb-6">
                   {/* Vote percentages */}
-                  <div className="grid grid-cols-3 gap-2 text-xs sm:text-sm mb-2">
+                  <div className="grid grid-cols-3 gap-4 text-sm sm:text-base mb-3">
                     <div className="text-green-600 font-medium">Yes: {voteData.yesPercentage.toFixed(1)}%</div>
                     <div className="text-red-600 font-medium text-center">No: {voteData.noPercentage.toFixed(1)}%</div>
                     <div className="text-gray-600 font-medium text-right">Abstain: {voteData.abstainPercentage.toFixed(1)}%</div>
@@ -782,44 +768,42 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
                   {renderVoteBar(proposal)}
                   
                   {/* Vote counts */}
-                  <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mt-1">
-                    <div>{voteData.yesVotes} voter{voteData.yesVotes !== 1 && 's'}</div>
-                    <div className="text-center">{voteData.noVotes} voter{voteData.noVotes !== 1 && 's'}</div>
-                    <div className="text-right">{voteData.abstainVotes} voter{voteData.abstainVotes !== 1 && 's'}</div>
+                  <div className="grid grid-cols-3 gap-4 text-sm text-gray-500 mt-2">
+                    <div>{Math.round(voteData.yesVotes)} voter{Math.round(voteData.yesVotes) !== 1 && 's'}</div>
+                    <div className="text-center">{Math.round(voteData.noVotes)} voter{Math.round(voteData.noVotes) !== 1 && 's'}</div>
+                    <div className="text-right">{Math.round(voteData.abstainVotes)} voter{Math.round(voteData.abstainVotes) !== 1 && 's'}</div>
                   </div>
                   
-                  {/* Voting power section */}
-                  <div className="mt-3 text-xs text-gray-500">
-                    <div className="flex justify-between mb-1">
-                      <span>Voting Power:</span>
-                      <span>{Math.round(voteData.totalVotingPower || 0).toLocaleString()} JUST total</span>
+                  {/* Voting power section - FOLLOWING DASHBOARD APPROACH */}
+                  <div className="mt-5 border-t pt-4 text-sm text-gray-600">
+                    <div className="flex justify-between mb-0">
                     </div>
                     
                     {/* Display voting power values */}
-                    <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mt-1">
-                      <div>{Math.round(voteData.yesVotingPower || 0).toLocaleString()} JUST</div>
-                      <div className="text-center">{Math.round(voteData.noVotingPower || 0).toLocaleString()} JUST</div>
-                      <div className="text-right">{Math.round(voteData.abstainVotingPower || 0).toLocaleString()} JUST</div>
+                    <div className="grid grid-cols-3 gap-4 text-sm text-gray-600 mt-1">
+                      <div>{formatToFiveDecimals(voteData.yesVotingPower || 0)} JST</div>
+                      <div className="text-center">{formatToFiveDecimals(voteData.noVotingPower || 0)} JST</div>
+                      <div className="text-right">{formatToFiveDecimals(voteData.abstainVotingPower || 0)} JST</div>
                     </div>
                   </div>
                   
                   {/* Show if the data includes pending votes */}
                   {isPending && (
-                    <div className="text-xs text-yellow-600 mt-2 italic">
+                    <div className="text-sm text-yellow-600 mt-3 italic">
                       Vote in progress, waiting for blockchain confirmation...
                     </div>
                   )}
                   
                   {/* Total voters count */}
-                  <div className="text-xs text-gray-500 mt-2 text-right">
+                  <div className="text-sm text-gray-500 mt-3 text-right">
                     Total voters: {voteData.totalVoters || 0}
                   </div>
                 </div>
                 
                 {userVoted ? (
-                  <div className="flex items-center text-sm text-gray-700">
+                  <div className="flex items-center text-base text-gray-700 p-3 bg-blue-50 rounded-lg">
                     <span className="mr-2">You voted:</span>
-                    <span className="px-2 py-1 rounded-full text-xs bg-blue-100 text-blue-800">
+                    <span className="px-3 py-1 rounded-full text-sm bg-blue-100 text-blue-800 font-medium">
                       {getVoteTypeText(voteType)}
                     </span>
                   </div>
@@ -827,46 +811,46 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
                   <div>
                     {hasVotingPower ? (
                       <div>
-                        <div className="mb-2 text-sm text-gray-600">
-                          Your voting power: {votingPower} JUST
+                        <div className="mb-3 text-base text-gray-700 p-3 bg-indigo-50 rounded-lg">
+                          Your voting power: <span className="font-medium">{formatToFiveDecimals(votingPower)} JST</span>
                         </div>
                         
                         {quorum && (
-                          <div className="mt-4">
-                            <div className="flex justify-between text-xs text-gray-600 mb-1">
-                              <span>Quorum Progress</span>
+                          <div className="mt-5 mb-5">
+                            <div className="flex justify-between text-sm text-gray-700 mb-2">
+                              <span className="font-medium">Quorum Progress</span>
                               <span>
-                                {Math.round(voteData.totalVotingPower || 0).toLocaleString()} / {quorum.toLocaleString()} JUST
-                                ({Math.min(100, Math.round((voteData.totalVotingPower / quorum) * 100))}%)
+                                {formatNumberDisplay(voteData.totalVotingPower || 0)} / {quorum ? formatNumberDisplay(quorum) : 0} JST
+                                ({Math.min(100, Math.round(((voteData.totalVotingPower || 0) / (quorum || 1)) * 100))}%)
                               </span>
                             </div>
-                            <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                            <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
                               <div 
                                 className="bg-blue-500 h-full rounded-full" 
-                                style={{ width: `${Math.min(100, (voteData.totalVotingPower / quorum) * 100)}%` }}
+                                style={{ width: `${Math.min(100, ((voteData.totalVotingPower || 0) / (quorum || 1)) * 100)}%` }}
                               ></div>
                             </div>
                           </div>
                         )}
-                        <div className="flex flex-wrap gap-2 mt-4">
+                        <div className="flex flex-wrap gap-4 mt-6">
                           <button 
-                            className="flex-1 min-w-0 bg-green-500 hover:bg-green-600 text-white py-2 px-1 rounded-md flex items-center justify-center text-xs sm:text-sm"
+                            className="flex-1 min-w-0 bg-green-500 hover:bg-green-600 text-white py-3 px-2 rounded-lg flex items-center justify-center text-sm sm:text-base font-medium"
                             onClick={() => submitVote(proposal.id, VOTE_TYPES.FOR)}
                             disabled={voting.processing || isPending}
                           >
-                            <Check className="w-3 h-3 sm:w-4 sm:h-4 mr-1 flex-shrink-0" />
+                            <Check className="w-5 h-5 mr-2 flex-shrink-0" />
                             <span className="truncate">Yes</span>
                           </button>
                           <button 
-                            className="flex-1 min-w-0 bg-red-500 hover:bg-red-600 text-white py-2 px-1 rounded-md flex items-center justify-center text-xs sm:text-sm"
+                            className="flex-1 min-w-0 bg-red-500 hover:bg-red-600 text-white py-3 px-2 rounded-lg flex items-center justify-center text-sm sm:text-base font-medium"
                             onClick={() => submitVote(proposal.id, VOTE_TYPES.AGAINST)}
                             disabled={voting.processing || isPending}
                           >
-                            <X className="w-3 h-3 sm:w-4 sm:h-4 mr-1 flex-shrink-0" />
+                            <X className="w-5 h-5 mr-2 flex-shrink-0" />
                             <span className="truncate">No</span>
                           </button>
                           <button 
-                            className="flex-1 min-w-0 bg-gray-500 hover:bg-gray-600 text-white py-2 px-1 rounded-md flex items-center justify-center text-xs sm:text-sm"
+                            className="flex-1 min-w-0 bg-gray-500 hover:bg-gray-600 text-white py-3 px-2 rounded-lg flex items-center justify-center text-sm sm:text-base font-medium"
                             onClick={() => submitVote(proposal.id, VOTE_TYPES.ABSTAIN)}
                             disabled={voting.processing || isPending}
                           >
@@ -875,16 +859,16 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
                         </div>
                       </div>
                     ) : (
-                      <div className="text-center py-2 text-red-500">
+                      <div className="text-center py-4 text-red-500 bg-red-50 rounded-lg my-3">
                         You don't have voting power for this proposal. You may need to delegate to yourself or acquire tokens before the snapshot.
                       </div>
                     )}
                   </div>
                 )}
                 
-                <div className="mt-4 text-center">
+                <div className="mt-6 text-center">
                   <button 
-                    className="text-indigo-600 hover:text-indigo-800 text-sm font-medium"
+                    className="text-indigo-600 hover:text-indigo-800 text-sm font-medium px-3 py-1.5 border border-indigo-300 rounded-md hover:bg-indigo-50"
                     onClick={() => {
                       setSelectedProposal(proposal);
                       setShowModal(true);
@@ -897,7 +881,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
             );
           })
         ) : (
-          <div className="text-center py-8 text-gray-500">
+          <div className="text-center py-12 text-gray-500 bg-white p-8 rounded-lg shadow-md">
             No proposals found for this filter
           </div>
         )}
@@ -962,7 +946,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
                 <div className="flex items-center text-sm">
                   <BarChart2 className="w-4 h-4 mr-2 text-gray-500" />
                   <div>
-                    <span className="text-gray-600">Quorum:</span> {quorum ? `${quorum.toLocaleString()} JUST` : "Loading..."}
+                    <span className="text-gray-600">Quorum:</span> {quorum ? `${formatNumberDisplay(quorum)} JST` : "Loading..."}
                   </div>
                 </div>
               </div>
@@ -990,15 +974,15 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
                         
                         <div className="grid grid-cols-3 gap-4 text-center mb-3">
                           <div>
-                            <div className="text-green-600 font-medium">{voteData.yesVotes}</div>
+                            <div className="text-green-600 font-medium">{Math.round(voteData.yesVotes)}</div>
                             <div className="text-xs text-gray-500">Yes Votes</div>
                           </div>
                           <div>
-                            <div className="text-red-600 font-medium">{voteData.noVotes}</div>
+                            <div className="text-red-600 font-medium">{Math.round(voteData.noVotes)}</div>
                             <div className="text-xs text-gray-500">No Votes</div>
                           </div>
                           <div>
-                            <div className="text-gray-600 font-medium">{voteData.abstainVotes}</div>
+                            <div className="text-gray-600 font-medium">{Math.round(voteData.abstainVotes)}</div>
                             <div className="text-xs text-gray-500">Abstain</div>
                           </div>
                         </div>
@@ -1031,22 +1015,22 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
                         {/* Voting power display */}
                         <div className="grid grid-cols-3 gap-4 text-center mb-3">
                           <div>
-                            <div className="text-green-600 font-medium">{Math.round(voteData.yesVotingPower || 0).toLocaleString()}</div>
-                            <div className="text-xs text-gray-500">Yes JUST</div>
+                            <div className="text-green-600 font-medium">{formatToFiveDecimals(voteData.yesVotingPower || 0)}</div>
+                            <div className="text-xs text-gray-500">Yes JST</div>
                           </div>
                           <div>
-                            <div className="text-red-600 font-medium">{Math.round(voteData.noVotingPower || 0).toLocaleString()}</div>
-                            <div className="text-xs text-gray-500">No JUST</div>
+                            <div className="text-red-600 font-medium">{formatToFiveDecimals(voteData.noVotingPower || 0)}</div>
+                            <div className="text-xs text-gray-500">No JST</div>
                           </div>
                           <div>
-                            <div className="text-gray-600 font-medium">{Math.round(voteData.abstainVotingPower || 0).toLocaleString()}</div>
-                            <div className="text-xs text-gray-500">Abstain JUST</div>
+                            <div className="text-gray-600 font-medium">{formatToFiveDecimals(voteData.abstainVotingPower || 0)}</div>
+                            <div className="text-xs text-gray-500">Abstain JST</div>
                           </div>
                         </div>
                         
                         {/* Total voting power */}
                         <div className="text-center text-xs text-gray-500 mt-3">
-                          Total voting power: {Math.round(voteData.totalVotingPower || 0).toLocaleString()} JUST
+                          Total voting power: {formatNumberDisplay(voteData.totalVotingPower || 0)} JST
                         </div>
                       </>
                     );

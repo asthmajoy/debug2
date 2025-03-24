@@ -185,31 +185,96 @@ export function useVoting() {
 
   // Delegate to the context to get proposal vote totals
   const getProposalVoteTotals = useCallback(async (proposalId) => {
-    try {
-      // Try to get from cache first
-      const cacheKey = `voteTotals-${proposalId}`;
-      const cachedTotals = blockchainDataCache.get(cacheKey);
-      if (cachedTotals !== null) {
-        return cachedTotals;
-      }
-      
-      // Get from context/blockchain if not cached
-      const result = await contextGetVoteTotals(proposalId);
-      
-      // Cache the result if it has meaningful data
-      if (result && (parseFloat(result.yesVotes) > 0 || 
-                     parseFloat(result.noVotes) > 0 || 
-                     parseFloat(result.abstainVotes) > 0 || 
-                     result.totalVoters > 0)) {
-        blockchainDataCache.set(cacheKey, result);
-      }
-      
-      return result;
-    } catch (error) {
-      console.error(`Error in getProposalVoteTotals for proposal ${proposalId}:`, error);
-      return null;
+    if (!contractsReady || !isConnected || !contracts.governance) {
+      return {
+        // Use consistent string format for all voting power values
+        yesVotes: "0",
+        noVotes: "0",
+        abstainVotes: "0",
+        totalVoters: 0,
+        yesPercentage: 0,
+        noPercentage: 0,
+        abstainPercentage: 0,
+        yesVotingPower: "0",
+        noVotingPower: "0",
+        abstainVotingPower: "0",
+        totalVotingPower: "0",
+        source: 'not-connected'
+      };
     }
-  }, [contextGetVoteTotals]);
+    
+    try {
+      console.log(`Fetching vote totals for proposal ${proposalId} using governance contract`);
+      
+      // Call the contract method to get voting power values
+      // Note: In this governance system, all vote counts are weighted by JST token voting power
+      const [yesVotes, noVotes, abstainVotes, totalVotingPower, totalVoters] = 
+        await contracts.governance.getProposalVoteTotals(proposalId);
+      
+      // Convert BigNumber values to formatted strings (representing JST tokens)
+      const yesVotingPower = ethers.utils.formatEther(yesVotes);
+      const noVotingPower = ethers.utils.formatEther(noVotes);
+      const abstainVotingPower = ethers.utils.formatEther(abstainVotes);
+      const totalVotingPowerStr = ethers.utils.formatEther(totalVotingPower);
+      
+      // Calculate percentages based on voting power
+      let yesPercentage = 0;
+      let noPercentage = 0;
+      let abstainPercentage = 0;
+      
+      if (!totalVotingPower.isZero()) {
+        yesPercentage = yesVotes.mul(100).div(totalVotingPower).toNumber();
+        noPercentage = noVotes.mul(100).div(totalVotingPower).toNumber();
+        abstainPercentage = abstainVotes.mul(100).div(totalVotingPower).toNumber();
+      }
+      
+      console.log(`Vote data from contract for proposal ${proposalId}:`, {
+        yesVotingPower,
+        noVotingPower,
+        abstainVotingPower,
+        totalVoters: totalVoters.toNumber()
+      });
+      
+      // Return both vote counts and explicit voting power fields
+      // Both sets of values represent the same JST token amounts
+      return {
+        // For backward compatibility, include yesVotes/noVotes/abstainVotes fields
+        // These are the same as the voting power values
+        yesVotes: yesVotingPower,
+        noVotes: noVotingPower,
+        abstainVotes: abstainVotingPower,
+        totalVotingPower: totalVotingPowerStr,
+        totalVoters: totalVoters.toNumber(),
+        yesPercentage,
+        noPercentage,
+        abstainPercentage,
+        
+        // Explicit voting power fields with the same values
+        yesVotingPower,
+        noVotingPower,
+        abstainVotingPower,
+        source: 'contract-getter'
+      };
+    } catch (error) {
+      console.error(`Error using getProposalVoteTotals contract method:`, error);
+      
+      // If the contract method fails, return consistent zero values
+      return {
+        yesVotes: "0",
+        noVotes: "0",
+        abstainVotes: "0",
+        totalVoters: 0,
+        yesPercentage: 0,
+        noPercentage: 0,
+        abstainPercentage: 0,
+        yesVotingPower: "0",
+        noVotingPower: "0",
+        abstainVotingPower: "0",
+        totalVotingPower: "0",
+        source: 'error'
+      };
+    }
+  }, [contractsReady, isConnected, contracts]);
   
   // Cast a vote using blockchain and handle state changes
   const castVote = async (proposalId, voteType) => {
