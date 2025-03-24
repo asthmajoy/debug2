@@ -6,6 +6,7 @@ import { BlockchainDataProvider } from './contexts/BlockchainDataContext';
 import JustDAODashboard from './components/JustDAO.jsx'; // Make sure to include the .jsx extension
 import Loader from './components/Loader';
 
+
 function App() {
   const { isConnected, connectWallet, contractsReady, contracts } = useWeb3();
   const { loading: authLoading } = useAuth();

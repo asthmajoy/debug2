@@ -1,202 +1,85 @@
-// src/services/BlockchainDataService.js - Enhanced version
+// src/contexts/BlockchainDataContext.jsx
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { useWeb3 } from './Web3Context';
 import { ethers } from 'ethers';
+import blockchainDataCache from '../utils/blockchainDataCache';
 
-/**
- * Service for fetching token and delegation data directly from the blockchain
- * with NO mock/placeholder data whatsoever
- */
-class BlockchainDataService {
-  constructor(web3Context, contracts) {
-    this.web3Context = web3Context;
-    this.contracts = contracts;
-    this.tokenContract = contracts?.justToken;
-    this.governanceContract = contracts?.governance;
-    this.timelockContract = contracts?.timelock;
-    this.provider = web3Context?.provider;
-    
-    console.log('BlockchainDataService initialized with:', {
-      provider: Boolean(this.provider),
-      tokenContract: Boolean(this.tokenContract),
-      governanceContract: Boolean(this.governanceContract),
-      timelockContract: Boolean(this.timelockContract),
-      contractKeys: Object.keys(contracts || {})
-    });
-    
-    // Cache settings - using shorter TTL for development
-    this.cache = {
-      balances: new Map(),
-      delegations: new Map(),
-      votingPower: new Map(),
-      proposals: new Map(),
-      stats: null,
-      votes: new Map()
-    };
-    this.cacheTTL = 3000; // 3 seconds cache lifetime
-    this.cacheTimestamps = {
-      balances: new Map(),
-      delegations: new Map(),
-      votingPower: new Map(),
-      proposals: new Map(),
-      stats: 0,
-      votes: new Map()
-    };
-  }
+// Create the context
+const BlockchainDataContext = createContext();
 
-  /**
-   * Initialize the service with updated context if needed
-   */
-  initialize(web3Context, contracts) {
-    this.web3Context = web3Context || this.web3Context;
-    this.contracts = contracts || this.contracts;
-    this.tokenContract = this.contracts?.justToken;
-    this.governanceContract = this.contracts?.governance;
-    this.timelockContract = this.contracts?.timelock;
-    this.provider = this.web3Context?.provider;
-    
-    console.log('BlockchainDataService re-initialized with:', {
-      provider: Boolean(this.provider),
-      tokenContract: Boolean(this.tokenContract),
-      governanceContract: Boolean(this.governanceContract),
-      timelockContract: Boolean(this.timelockContract),
-      contractKeys: Object.keys(this.contracts || {})
-    });
-    
-    this.clearCache();
-  }
-
-  /**
-   * Clear the entire cache or a specific cache type
-   */
-  clearCache(cacheType = null) {
-    if (cacheType) {
-      this.cache[cacheType].clear();
-      if (this.cacheTimestamps[cacheType] instanceof Map) {
-        this.cacheTimestamps[cacheType].clear();
-      } else {
-        this.cacheTimestamps[cacheType] = 0;
-      }
-    } else {
-      this.cache.balances.clear();
-      this.cache.delegations.clear();
-      this.cache.votingPower.clear();
-      this.cache.proposals.clear();
-      this.cache.votes.clear();
-      this.cache.stats = null;
-      
-      this.cacheTimestamps.balances.clear();
-      this.cacheTimestamps.delegations.clear();
-      this.cacheTimestamps.votingPower.clear();
-      this.cacheTimestamps.proposals.clear();
-      this.cacheTimestamps.votes.clear();
-      this.cacheTimestamps.stats = 0;
-    }
-  }
-
-  /**
-   * Check if cached data is still valid
-   */
-  isCacheValid(cacheType, key = null) {
-    const now = Date.now();
-    if (key) {
-      const timestamp = this.cacheTimestamps[cacheType].get(key);
-      return timestamp && (now - timestamp < this.cacheTTL);
-    } else {
-      return this.cacheTimestamps[cacheType] && (now - this.cacheTimestamps[cacheType] < this.cacheTTL);
-    }
-  }
-
-  /**
-   * Update cache with new data
-   */
-  updateCache(cacheType, key, data) {
-    if (key) {
-      this.cache[cacheType].set(key, data);
-      this.cacheTimestamps[cacheType].set(key, Date.now());
-    } else {
-      this.cache[cacheType] = data;
-      this.cacheTimestamps[cacheType] = Date.now();
-    }
-  }
-
-  /**
-   * Check if contract is available and has required method
-   * @param {string} contractName - Name of the contract in this.contracts object
-   * @param {string} methodName - Name of the method to check
-   * @returns {boolean} Whether the contract and method are available
-   */
-  hasContractMethod(contractName, methodName) {
-    if (!this.contracts || !this.contracts[contractName]) {
-      console.error(`Contract ${contractName} not available`);
-      return false;
-    }
-    
-    const contract = this.contracts[contractName];
-    if (!contract[methodName] || typeof contract[methodName] !== 'function') {
-      console.error(`Method ${methodName} not found on contract ${contractName}`);
-      return false;
-    }
-    
-    return true;
-  }
-
-  /**
-   * Fetch token balance for an address directly from the blockchain
-   */
-  async getTokenBalance(address) {
-    if (!address) {
-      console.error("Missing address for getTokenBalance");
+// Provider component
+export const BlockchainDataProvider = ({ children }) => {
+  // Get Web3 context
+  const { 
+    account, 
+    isConnected, 
+    provider, 
+    contracts, 
+    contractsReady, 
+    refreshCounter,
+    getContractByName
+  } = useWeb3();
+  
+  // State for user data
+  const [userData, setUserData] = useState({
+    address: null,
+    balance: "0",
+    votingPower: "0",
+    delegate: null,
+    lockedTokens: "0",
+    delegatedToYou: "0",
+    delegators: [],
+    hasVotedProposals: {}
+  });
+  
+  // State for DAO statistics
+  const [daoStats, setDaoStats] = useState({
+    totalHolders: 0,
+    circulatingSupply: "0",
+    activeProposals: 0,
+    totalProposals: 0,
+    participationRate: 0,
+    delegationRate: 0,
+    proposalSuccessRate: 0
+  });
+  
+  // Loading and error states
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+  
+  // Counter for manual refreshes
+  const [manualRefreshCounter, setManualRefreshCounter] = useState(0);
+  
+  // Fetch token balance for an address directly from the blockchain
+  const getTokenBalance = useCallback(async (address) => {
+    if (!address || !contractsReady || !contracts.justToken) {
       return "0";
     }
     
-    if (!this.hasContractMethod('justToken', 'balanceOf')) {
-      console.error("Token contract balanceOf method not available");
-      return "0";
-    }
-
     try {
-      // Check cache first
-      if (this.isCacheValid('balances', address)) {
-        return this.cache.balances.get(address);
+      // Try to get from cache first
+      const cacheKey = `balance-${address}`;
+      const cachedBalance = blockchainDataCache.get(cacheKey);
+      if (cachedBalance !== null) {
+        return cachedBalance;
       }
-
-      // If not in cache or expired, fetch from blockchain
-      console.log(`Fetching balance for ${address}`);
-      const balance = await this.tokenContract.balanceOf(address);
-      const formattedBalance = ethers.utils.formatEther(balance);
-      console.log(`Raw balance for ${address}:`, balance.toString(), "formatted:", formattedBalance);
       
-      // Update cache
-      this.updateCache('balances', address, formattedBalance);
+      const balance = await contracts.justToken.balanceOf(address);
+      const formattedBalance = ethers.utils.formatEther(balance);
+      
+      // Cache the result
+      blockchainDataCache.set(cacheKey, formattedBalance);
       
       return formattedBalance;
     } catch (error) {
       console.error("Error fetching token balance:", error);
       return "0";
     }
-  }
+  }, [contractsReady, contracts]);
 
-  /**
-   * Fetch delegation info for an address
-   */
-  async getDelegationInfo(address) {
-    if (!address) {
-      console.error("Missing address for getDelegationInfo");
-      return {
-        currentDelegate: null,
-        lockedTokens: "0",
-        delegatedToYou: "0",
-        delegators: []
-      };
-    }
-
-    // Check required contract methods
-    const hasDelegate = this.hasContractMethod('justToken', 'getDelegate');
-    const hasLockedTokens = this.hasContractMethod('justToken', 'getLockedTokens');
-    const hasDelegatedToAddress = this.hasContractMethod('justToken', 'getDelegatedToAddress');
-    const hasDelegatorsOf = this.hasContractMethod('justToken', 'getDelegatorsOf');
-    
-    if (!hasDelegate || !hasLockedTokens || !hasDelegatedToAddress || !hasDelegatorsOf) {
-      console.error("Required delegation methods not available on contract");
+  // Fetch delegation info for an address
+  const getDelegationInfo = useCallback(async (address) => {
+    if (!address || !contractsReady || !contracts.justToken) {
       return {
         currentDelegate: null,
         lockedTokens: "0",
@@ -206,29 +89,32 @@ class BlockchainDataService {
     }
 
     try {
-      // Check cache first
-      if (this.isCacheValid('delegations', address)) {
-        return this.cache.delegations.get(address);
+      // Try to get from cache first
+      const cacheKey = `delegation-${address}`;
+      const cachedInfo = blockchainDataCache.get(cacheKey);
+      if (cachedInfo !== null) {
+        return cachedInfo;
       }
-
-      // If not in cache or expired, fetch from blockchain
-      console.log(`Fetching delegation info for ${address}`);
-      const currentDelegate = await this.tokenContract.getDelegate(address);
-      const lockedTokens = await this.tokenContract.getLockedTokens(address);
-      const delegatedToYou = await this.tokenContract.getDelegatedToAddress(address);
-      const delegatorAddresses = await this.tokenContract.getDelegatorsOf(address);
       
-      console.log(`Delegation data for ${address}:`, {
-        currentDelegate,
-        lockedTokens: lockedTokens.toString(),
-        delegatedToYou: delegatedToYou.toString(),
-        delegatorCount: delegatorAddresses.length
-      });
+      // Get delegation data from contract
+      const tokenContract = contracts.justToken;
+      
+      // Get current delegate
+      const currentDelegate = await tokenContract.getDelegate(address);
+      
+      // Get locked tokens
+      const lockedTokens = await tokenContract.getLockedTokens(address);
+      
+      // Get tokens delegated to this address
+      const delegatedToYou = await tokenContract.getDelegatedToAddress(address);
+      
+      // Get delegators list
+      const delegatorAddresses = await tokenContract.getDelegatorsOf(address);
       
       // Get balance for each delegator
       const delegators = await Promise.all(
         delegatorAddresses.map(async (delegatorAddr) => {
-          const balance = await this.getTokenBalance(delegatorAddr);
+          const balance = await getTokenBalance(delegatorAddr);
           return {
             address: delegatorAddr,
             balance
@@ -243,8 +129,8 @@ class BlockchainDataService {
         delegators
       };
       
-      // Update cache
-      this.updateCache('delegations', address, delegationInfo);
+      // Cache the result
+      blockchainDataCache.set(cacheKey, delegationInfo);
       
       return delegationInfo;
     } catch (error) {
@@ -256,36 +142,27 @@ class BlockchainDataService {
         delegators: []
       };
     }
-  }
+  }, [contractsReady, contracts, getTokenBalance]);
 
-  /**
-   * Calculate voting power for an address
-   */
-  async getVotingPower(address) {
-    if (!address) {
-      console.error("Missing address for getVotingPower");
-      return "0";
-    }
-
-    // Check required methods
-    if (!this.hasContractMethod('justToken', 'balanceOf') || 
-        !this.hasContractMethod('justToken', 'getDelegate') ||
-        !this.hasContractMethod('justToken', 'getDelegatedToAddress')) {
-      console.error("Required voting power methods not available on contract");
+  // Calculate voting power for an address
+  const getVotingPower = useCallback(async (address) => {
+    if (!address || !contractsReady || !contracts.justToken) {
       return "0";
     }
 
     try {
-      // Check cache first
-      if (this.isCacheValid('votingPower', address)) {
-        return this.cache.votingPower.get(address);
+      // Try to get from cache first
+      const cacheKey = `votingPower-${address}`;
+      const cachedPower = blockchainDataCache.get(cacheKey);
+      if (cachedPower !== null) {
+        return cachedPower;
       }
-
-      console.log(`Calculating voting power for ${address}`);
       
-      // Get the balance and delegation info
-      const balance = await this.getTokenBalance(address);
-      const delegationInfo = await this.getDelegationInfo(address);
+      // Get delegation info
+      const delegationInfo = await getDelegationInfo(address);
+      
+      // Get user balance
+      const balance = await getTokenBalance(address);
       
       // If self-delegated, add delegated tokens to voting power
       // Otherwise, voting power is 0 (delegated away)
@@ -298,89 +175,105 @@ class BlockchainDataService {
         const ownBalance = ethers.utils.parseEther(balance);
         const delegated = ethers.utils.parseEther(delegationInfo.delegatedToYou || "0");
         votingPower = ethers.utils.formatEther(ownBalance.add(delegated));
-        console.log(`Voting power components for ${address}:`, {
-          ownBalance: balance,
-          delegated: delegationInfo.delegatedToYou,
-          total: votingPower
-        });
       } else {
         console.log(`User ${address} has delegated to ${delegationInfo.currentDelegate}, voting power is 0`);
       }
       
-      // Update cache
-      this.updateCache('votingPower', address, votingPower);
+      // Cache the result
+      blockchainDataCache.set(cacheKey, votingPower);
       
       return votingPower;
     } catch (error) {
       console.error("Error calculating voting power:", error);
       return "0";
     }
-  }
+  }, [contractsReady, contracts, getDelegationInfo, getTokenBalance]);
 
-  /**
-   * Fetch user's vote history from blockchain events
-   */
-  async getUserVotes(address) {
-    if (!address || !this.governanceContract) {
-      return {};
-    }
+  // Get user's voted proposals directly from blockchain events
+  const getVotedProposals = useCallback(async () => {
+    if (!contractsReady || !isConnected || !account || !contracts.governance) return {};
     
     try {
-      // Check cache first
-      const cacheKey = `votes-${address}`;
-      if (this.isCacheValid('votes', cacheKey)) {
-        return this.cache.votes.get(cacheKey);
+      // Try to get from cache first
+      const cacheKey = `votedProposals-${account}`;
+      const cachedVotes = blockchainDataCache.get(cacheKey);
+      if (cachedVotes !== null) {
+        return cachedVotes;
       }
       
-      console.log(`Fetching vote history for ${address}`);
+      // Use events to get all proposals the user has voted on
+      const governance = contracts.governance;
+      const filter = governance.filters.VoteCast(null, account);
+      const events = await governance.queryFilter(filter);
       
-      // Get all VoteCast events for this user
-      const filter = this.governanceContract.filters.VoteCast(null, address);
-      const events = await this.governanceContract.queryFilter(filter);
-      
-      console.log(`Found ${events.length} vote events for user ${address}`);
-      
-      // Process events into a map of proposalId -> voteType
-      const voteHistory = {};
-      
+      const votedProposals = {};
       for (const event of events) {
         try {
           const proposalId = event.args.proposalId.toString();
-          const voteType = event.args.support.toNumber();
-          const votingPower = ethers.utils.formatEther(event.args.votingPower);
+          const voteType = event.args.support;
           
-          // Only keep the most recent vote for each proposal
-          voteHistory[proposalId] = {
-            type: voteType,
-            votingPower,
-            blockNumber: event.blockNumber,
-            transactionHash: event.transactionHash
+          votedProposals[proposalId] = {
+            type: Number(voteType),
+            timestamp: (await event.getBlock()).timestamp
           };
         } catch (err) {
           console.warn("Error processing vote event:", err);
         }
       }
       
-      // Update cache
-      this.updateCache('votes', cacheKey, voteHistory);
+      // Cache the result
+      blockchainDataCache.set(cacheKey, votedProposals);
       
-      return voteHistory;
+      return votedProposals;
     } catch (error) {
-      console.error(`Error fetching vote history for ${address}:`, error);
+      console.error("Error fetching voted proposals:", error);
       return {};
     }
-  }
+  }, [contractsReady, isConnected, account, contracts]);
 
+  // Check if user has voted on a proposal
+  const hasVoted = useCallback(async (proposalId) => {
+    if (!isConnected || !account || !contractsReady || !contracts.governance) return false;
+    
+    try {
+      // First check if we already know from userData
+      if (userData.hasVotedProposals[proposalId]) {
+        return true;
+      }
+      
+      // Try to get from cache
+      const cacheKey = `hasVoted-${account}-${proposalId}`;
+      const cachedResult = blockchainDataCache.get(cacheKey);
+      if (cachedResult !== null) {
+        return cachedResult;
+      }
+      
+      // Check directly from contract
+      const voterInfo = await contracts.governance.proposalVoterInfo(proposalId, account);
+      const result = !voterInfo.isZero();
+      
+      // Cache the result
+      blockchainDataCache.set(cacheKey, result);
+      
+      return result;
+    } catch (err) {
+      console.error(`Error checking if user has voted on proposal ${proposalId}:`, err);
+      return false;
+    }
+  }, [isConnected, account, contractsReady, contracts, userData.hasVotedProposals]);
+
+  // Enhanced function to get proposal vote totals from blockchain
   /**
-   * Fetch proposal vote totals from the blockchain
-   */
-  async getProposalVoteTotals(proposalId) {
-    if (!proposalId || !this.governanceContract) {
-      console.error("Missing proposal ID or governance contract for getProposalVoteTotals");
+ * Get proposal vote totals directly from blockchain
+ * @param {string|number} proposalId - The proposal ID
+ * @returns {Object} Vote data including counts and voting power
+ */
+const getProposalVoteTotals = useCallback(async (proposalId) => {
+    if (!contractsReady || !isConnected || !contracts.governance) {
       return {
-        yesVotes: 0,
-        noVotes: 0,
-        abstainVotes: 0,
+        yesVotes: "0",
+        noVotes: "0",
+        abstainVotes: "0",
         totalVoters: 0,
         yesPercentage: 0,
         noPercentage: 0,
@@ -389,140 +282,235 @@ class BlockchainDataService {
     }
     
     try {
-      // Check cache first
-      const cacheKey = `votes-${proposalId}`;
-      if (this.isCacheValid('proposals', cacheKey)) {
-        return this.cache.proposals.get(cacheKey);
-      }
-
-      // If not in cache or expired, fetch from blockchain
       console.log(`Fetching vote totals for proposal ${proposalId}`);
-      
-      // Try first method: direct getProposalVotes call
-      try {
-        console.log("Using getProposalVotes method");
-        const [yesVotes, noVotes, abstainVotes, totalVotingPower, totalVoters] = 
-            await this.governanceContract.getProposalVotes(proposalId);
+  
+      // Try to get votes using getProposalVotes method - this is the new contract function
+      const [yesVotes, noVotes, abstainVotes, totalVotingPower, totalVoters] = 
+        await contracts.governance.getProposalVotes(proposalId);
         
-        // Calculate percentages
-        const totalVotes = yesVotes.add(noVotes).add(abstainVotes);
-        const yesPercentage = totalVotes.gt(0) ? yesVotes.mul(100).div(totalVotes).toNumber() : 0;
-        const noPercentage = totalVotes.gt(0) ? noVotes.mul(100).div(totalVotes).toNumber() : 0;
-        const abstainPercentage = totalVotes.gt(0) ? abstainVotes.mul(100).div(totalVotes).toNumber() : 0;
-        
-        const voteTotals = {
-          yesVotes: ethers.utils.formatEther(yesVotes),
-          noVotes: ethers.utils.formatEther(noVotes),
-          abstainVotes: ethers.utils.formatEther(abstainVotes),
-          totalVotingPower: ethers.utils.formatEther(totalVotingPower),
-          totalVoters: totalVoters.toNumber(),
-          yesPercentage,
-          noPercentage,
-          abstainPercentage,
-          source: 'contract'
-        };
-        
-        console.log(`Vote totals for proposal ${proposalId}:`, voteTotals);
-        
-        // Update cache
-        this.updateCache('proposals', cacheKey, voteTotals);
-        
-        return voteTotals;
-      } catch (directError) {
-        console.warn("Direct getProposalVotes call failed, using event-based approach:", directError);
-      }
-      
-      // Fallback method: Use events to calculate vote totals
-      console.log("Using event-based approach for vote totals");
-      
-      // Get all VoteCast events for this proposal
-      const filter = this.governanceContract.filters.VoteCast(proposalId);
-      const events = await this.governanceContract.queryFilter(filter);
-      
-      console.log(`Found ${events.length} vote events for proposal ${proposalId}`);
-      
-      // Process the events to calculate vote totals
-      const voterVotes = new Map(); // address -> {voteType, votingPower}
-      
-      for (const event of events) {
-        try {
-          const voter = event.args.voter;
-          const support = event.args.support.toNumber();
-          const votingPower = event.args.votingPower;
-          
-          // Save the voter's vote (overwriting previous votes by the same voter)
-          voterVotes.set(voter.toLowerCase(), {
-            voteType: support,
-            votingPower
-          });
-        } catch (err) {
-          console.warn("Error processing vote event:", err);
-        }
-      }
-      
-      // Calculate totals based on the processed events
-      let yesVotes = ethers.BigNumber.from(0);
-      let noVotes = ethers.BigNumber.from(0);
-      let abstainVotes = ethers.BigNumber.from(0);
-      
-      for (const [, vote] of voterVotes.entries()) {
-        const { voteType, votingPower } = vote;
-        if (voteType === 0) { // Against
-          noVotes = noVotes.add(votingPower);
-        } else if (voteType === 1) { // For
-          yesVotes = yesVotes.add(votingPower);
-        } else if (voteType === 2) { // Abstain
-          abstainVotes = abstainVotes.add(votingPower);
-        }
-      }
-      
+      // Calculate percentages
       const totalVotes = yesVotes.add(noVotes).add(abstainVotes);
       const yesPercentage = totalVotes.gt(0) ? yesVotes.mul(100).div(totalVotes).toNumber() : 0;
       const noPercentage = totalVotes.gt(0) ? noVotes.mul(100).div(totalVotes).toNumber() : 0;
       const abstainPercentage = totalVotes.gt(0) ? abstainVotes.mul(100).div(totalVotes).toNumber() : 0;
       
-      const eventBasedVoteTotals = {
-        yesVotes: ethers.utils.formatEther(yesVotes),
-        noVotes: ethers.utils.formatEther(noVotes),
-        abstainVotes: ethers.utils.formatEther(abstainVotes),
-        totalVotingPower: ethers.utils.formatEther(totalVotes),
-        totalVoters: voterVotes.size,
+      // Format the values
+      const formattedYesVotes = ethers.utils.formatEther(yesVotes);
+      const formattedNoVotes = ethers.utils.formatEther(noVotes);
+      const formattedAbstainVotes = ethers.utils.formatEther(abstainVotes);
+      const formattedTotalVotes = ethers.utils.formatEther(totalVotes);
+      
+      console.log(`Vote totals fetched:`, {
+        yes: formattedYesVotes,
+        no: formattedNoVotes,
+        abstain: formattedAbstainVotes,
+        totalPower: formattedTotalVotes,
+        voters: totalVoters.toNumber(),
+        yesPercent: yesPercentage,
+        noPercent: noPercentage,
+        abstainPercent: abstainPercentage
+      });
+      
+      return {
+        // These are voting power values from the contract
+        yesVotes: formattedYesVotes,
+        noVotes: formattedNoVotes,
+        abstainVotes: formattedAbstainVotes,
+        
+        // Also explicitly store as voting power for clarity
+        yesVotingPower: formattedYesVotes,
+        noVotingPower: formattedNoVotes,
+        abstainVotingPower: formattedAbstainVotes,
+        totalVotingPower: formattedTotalVotes,
+        
+        // Count of unique voters
+        totalVoters: totalVoters.toNumber(),
+        
+        // Percentages based on voting power
         yesPercentage,
         noPercentage,
         abstainPercentage,
-        source: 'events'
+        
+        // Include source info for debugging
+        source: 'contract'
       };
-      
-      console.log(`Event-based vote totals for proposal ${proposalId}:`, eventBasedVoteTotals);
-      
-      // Update cache
-      this.updateCache('proposals', cacheKey, eventBasedVoteTotals);
-      
-      return eventBasedVoteTotals;
     } catch (error) {
-      console.error(`Error fetching vote totals for proposal ${proposalId}:`, error);
+      console.error(`Error getting proposal vote totals using getProposalVotes:`, error);
+      
+      // Fallback: Use events to calculate vote totals if the direct call fails
+      // (kept the fallback mechanism, but with improved formatting)
+      try {
+        // Get all VoteCast events for this proposal
+        const filter = contracts.governance.filters.VoteCast(proposalId);
+        const events = await contracts.governance.queryFilter(filter);
+        
+        if (events.length === 0) {
+          return {
+            yesVotes: "0", noVotes: "0", abstainVotes: "0",
+            yesVotingPower: "0", noVotingPower: "0", abstainVotingPower: "0",
+            totalVotingPower: "0", totalVoters: 0,
+            yesPercentage: 0, noPercentage: 0, abstainPercentage: 0,
+            source: 'events-empty'
+          };
+        }
+        
+        // Process the events to calculate vote totals
+        const voterVotes = new Map(); // address -> {voteType, votingPower}
+        
+        for (const event of events) {
+          try {
+            const voter = event.args.voter;
+            const support = event.args.support.toNumber();
+            const votingPower = event.args.votingPower;
+            
+            // Save the voter's vote (overwriting previous votes by the same voter)
+            voterVotes.set(voter.toLowerCase(), {
+              voteType: support,
+              votingPower
+            });
+          } catch (err) {
+            console.warn("Error processing vote event:", err);
+          }
+        }
+        
+        // Calculate totals based on the processed events
+        let yesVotes = ethers.BigNumber.from(0);
+        let noVotes = ethers.BigNumber.from(0);
+        let abstainVotes = ethers.BigNumber.from(0);
+        
+        for (const [, vote] of voterVotes.entries()) {
+          const { voteType, votingPower } = vote;
+          if (voteType === 0) { // Against
+            noVotes = noVotes.add(votingPower);
+          } else if (voteType === 1) { // For
+            yesVotes = yesVotes.add(votingPower);
+          } else if (voteType === 2) { // Abstain
+            abstainVotes = abstainVotes.add(votingPower);
+          }
+        }
+        
+        const totalVotes = yesVotes.add(noVotes).add(abstainVotes);
+        const yesPercentage = totalVotes.gt(0) ? yesVotes.mul(100).div(totalVotes).toNumber() : 0;
+        const noPercentage = totalVotes.gt(0) ? noVotes.mul(100).div(totalVotes).toNumber() : 0;
+        const abstainPercentage = totalVotes.gt(0) ? abstainVotes.mul(100).div(totalVotes).toNumber() : 0;
+        
+        const formattedYesVotes = ethers.utils.formatEther(yesVotes);
+        const formattedNoVotes = ethers.utils.formatEther(noVotes);
+        const formattedAbstainVotes = ethers.utils.formatEther(abstainVotes);
+        const formattedTotalVotes = ethers.utils.formatEther(totalVotes);
+        
+        return {
+          // These are voting power values
+          yesVotes: formattedYesVotes,
+          noVotes: formattedNoVotes,
+          abstainVotes: formattedAbstainVotes,
+          
+          // Also explicitly store as voting power for clarity
+          yesVotingPower: formattedYesVotes,
+          noVotingPower: formattedNoVotes,
+          abstainVotingPower: formattedAbstainVotes,
+          totalVotingPower: formattedTotalVotes,
+          
+          // Count of unique voters
+          totalVoters: voterVotes.size,
+          
+          // Percentages based on voting power
+          yesPercentage,
+          noPercentage,
+          abstainPercentage,
+          
+          // Include source info for debugging
+          source: 'events'
+        };
+      } catch (fallbackError) {
+        console.error(`Error using events to get vote totals:`, fallbackError);
+        return {
+          yesVotes: "0", noVotes: "0", abstainVotes: "0",
+          yesVotingPower: "0", noVotingPower: "0", abstainVotingPower: "0",
+          totalVotingPower: "0", totalVoters: 0,
+          yesPercentage: 0, noPercentage: 0, abstainPercentage: 0,
+          source: 'error'
+        };
+      }
+    }
+  }, [contractsReady, isConnected, contracts]);
+
+  // Enhanced function to get detailed proposal vote information with fallbacks
+  const getDetailedProposalVotes = useCallback(async (proposalId) => {
+    if (!contractsReady || !isConnected || !contracts.governance) {
       return {
         yesVotes: "0",
         noVotes: "0",
         abstainVotes: "0",
+        totalVotes: "0",
         totalVoters: 0,
         yesPercentage: 0,
         noPercentage: 0,
         abstainPercentage: 0,
-        source: 'error'
+        quorumReached: false,
+        dataSource: 'none'
       };
     }
-  }
-
-  /**
-   * Get DAO statistics from blockchain
-   */
-  async getDAOStats() {
-    // Check required methods
-    const hasTotalSupply = this.hasContractMethod('justToken', 'totalSupply');
     
-    if (!hasTotalSupply) {
-      console.error("Required DAO stats methods not available on contracts");
+    try {
+      // Try to get from cache first
+      const cacheKey = `detailedVotes-${proposalId}`;
+      const cachedData = blockchainDataCache.get(cacheKey);
+      if (cachedData !== null) {
+        return cachedData;
+      }
+      
+      console.log(`Fetching detailed vote data for proposal ${proposalId}`);
+      
+      // First try to get data using the regular method for efficiency
+      const basicVoteData = await getProposalVoteTotals(proposalId);
+      
+      // Get quorum value for comparison
+      let quorum = ethers.BigNumber.from(0);
+      try {
+        const govParams = await contracts.governance.govParams();
+        quorum = govParams.quorum;
+      } catch (quorumError) {
+        console.warn("Error getting quorum value:", quorumError);
+      }
+      
+      // Determine if quorum is reached based on total voting power
+      const totalVotingPower = ethers.utils.parseEther(basicVoteData.totalVotingPower);
+      const quorumReached = quorum.gt(0) ? totalVotingPower.gte(quorum) : false;
+      
+      // Create detailed vote data
+      const detailedData = {
+        ...basicVoteData,
+        quorumReached,
+        requiredQuorum: quorum.gt(0) ? ethers.utils.formatEther(quorum) : "0",
+        totalVotes: basicVoteData.totalVotingPower,
+        dataSource: basicVoteData.source || 'combined'
+      };
+      
+      // Cache the result
+      blockchainDataCache.set(cacheKey, detailedData);
+      
+      return detailedData;
+    } catch (error) {
+      console.error(`Error in getDetailedProposalVotes for proposal ${proposalId}:`, error);
+      return {
+        yesVotes: "0",
+        noVotes: "0",
+        abstainVotes: "0",
+        totalVotes: "0",
+        totalVoters: 0,
+        yesPercentage: 0,
+        noPercentage: 0,
+        abstainPercentage: 0,
+        quorumReached: false,
+        dataSource: 'error'
+      };
+    }
+  }, [contractsReady, isConnected, contracts, getProposalVoteTotals]);
+
+  // Get DAO statistics from blockchain
+  const fetchDAOStats = useCallback(async () => {
+    if (!contractsReady || !isConnected) {
       return {
         totalHolders: 0,
         circulatingSupply: "0",
@@ -530,54 +518,37 @@ class BlockchainDataService {
         totalProposals: 0,
         participationRate: 0,
         delegationRate: 0,
-        proposalSuccessRate: 0,
-        formattedParticipationRate: "0.0%",
-        formattedDelegationRate: "0.0%",
-        formattedSuccessRate: "0.0%",
-        isLoading: false
+        proposalSuccessRate: 0
       };
     }
 
     try {
-      // Check cache first
-      if (this.isCacheValid('stats')) {
-        return this.cache.stats;
+      // Try to get from cache first
+      const cacheKey = 'daoStats';
+      const cachedStats = blockchainDataCache.get(cacheKey);
+      if (cachedStats !== null) {
+        return cachedStats;
       }
-
-      console.log("Fetching DAO stats from blockchain");
-      
-      // Initialize with default values
-      let totalHolders = 0;
-      let circulatingSupply = "0";
-      let activeProposals = 0;
-      let totalProposals = 0;
-      let participationRate = 0;
-      let delegationRate = 0;
-      let proposalSuccessRate = 0;
       
       // 1. Get total supply
-      const totalSupply = await this.tokenContract.totalSupply();
-      circulatingSupply = ethers.utils.formatEther(totalSupply);
+      const totalSupply = await contracts.justToken.totalSupply();
+      const circulatingSupply = ethers.utils.formatEther(totalSupply);
       
-      // 2. Estimate holder count using transfer events
+      // 2. Estimate holder count using Transfer events
+      let totalHolders = 0;
       try {
-        // Get Transfer events to identify potential holders
-        const filter = this.tokenContract.filters.Transfer();
-        const blockNumber = await this.provider.getBlockNumber();
-        // Go back a reasonable number of blocks - adjust as needed for your token history
+        // Get Transfer events to estimate unique holders
+        const filter = contracts.justToken.filters.Transfer();
+        const blockNumber = await provider.getBlockNumber();
         const fromBlock = Math.max(0, blockNumber - 10000);
         
-        console.log(`Querying transfer events from block ${fromBlock} to ${blockNumber}`);
-        const events = await this.tokenContract.queryFilter(filter, fromBlock);
-        console.log(`Found ${events.length} transfer events`);
+        const events = await contracts.justToken.queryFilter(filter, fromBlock);
         
         // Get unique addresses from transfer events
         const uniqueAddresses = new Set();
         
-        // Add all senders and receivers
         for (const event of events) {
           if (event.args) {
-            // Skip the zero address (typically used for minting/burning)
             if (event.args.from !== ethers.constants.AddressZero) {
               uniqueAddresses.add(event.args.from.toLowerCase());
             }
@@ -587,92 +558,85 @@ class BlockchainDataService {
           }
         }
         
-        console.log(`Found ${uniqueAddresses.size} unique addresses`);
-        totalHolders = uniqueAddresses.size;
+        totalHolders = uniqueAddresses.size || 10; // Default to 10 if we can't determine
       } catch (error) {
         console.error("Error estimating holder count:", error);
         totalHolders = 10; // Fallback value
       }
       
-      // 3. Get proposal counts (active and total)
+      // 3. Count active and total proposals
+      let activeProposals = 0;
+      let totalProposals = 0;
+      let proposalSuccessRate = 0;
+      
       try {
-        if (this.governanceContract) {
-          // Try to get active proposal count directly
-          if (typeof this.governanceContract.getActiveProposalCount === 'function') {
-            activeProposals = (await this.governanceContract.getActiveProposalCount()).toNumber();
-          } else {
-            // Estimate active proposals by checking states
-            let activePropCount = 0;
-            let totalPropCount = 0;
-            let successfulPropCount = 0;
+        // Try to get proposal count directly
+        if (typeof contracts.governance.getProposalCount === 'function') {
+          totalProposals = (await contracts.governance.getProposalCount()).toNumber();
+        } else {
+          // Find highest valid proposal ID
+          let highestId = 0;
+          let testId = 0;
+          let foundInvalid = false;
+          
+          while (!foundInvalid && testId < 100) {
+            try {
+              await contracts.governance.getProposalState(testId);
+              highestId = testId;
+              testId++;
+            } catch (err) {
+              foundInvalid = true;
+            }
+          }
+          
+          totalProposals = highestId + 1;
+        }
+        
+        // Count active and successful proposals
+        let successfulProposals = 0;
+        
+        for (let i = 0; i < totalProposals; i++) {
+          try {
+            const state = await contracts.governance.getProposalState(i);
             
-            // Determine the number of proposals by binary search or direct method
-            if (typeof this.governanceContract.getProposalCount === 'function') {
-              totalPropCount = (await this.governanceContract.getProposalCount()).toNumber();
-            } else {
-              // Binary search for the highest proposal ID
-              let low = 0;
-              let high = 100;
-              
-              while (low <= high) {
-                const mid = Math.floor((low + high) / 2);
-                
-                try {
-                  await this.governanceContract.getProposalState(mid);
-                  low = mid + 1;
-                } catch (err) {
-                  high = mid - 1;
-                }
-              }
-              
-              totalPropCount = high + 1;
+            if (state === 0) { // Active state is usually 0
+              activeProposals++;
             }
             
-            // Count active and successful proposals
-            for (let i = 0; i < totalPropCount; i++) {
-              try {
-                const state = await this.governanceContract.getProposalState(i);
-                
-                if (state === 0) { // Active
-                  activePropCount++;
-                }
-                
-                // Count as successful if state is 4 (Succeeded), 5 (Queued), or 7 (Executed)
-                if (state === 4 || state === 5 || state === 7) {
-                  successfulPropCount++;
-                }
-              } catch (err) {
-                // Skip if error
-              }
+            // States 4, 5, 7 typically represent success states
+            if (state === 4 || state === 5 || state === 7) {
+              successfulProposals++;
             }
-            
-            activeProposals = activePropCount;
-            totalProposals = totalPropCount;
-            
-            // Calculate success rate
-            proposalSuccessRate = totalPropCount > 0 ? successfulPropCount / totalPropCount : 0;
+          } catch (err) {
+            // Skip if error
           }
         }
+        
+        // Calculate success rate
+        proposalSuccessRate = totalProposals > 0 ? successfulProposals / totalProposals : 0;
       } catch (error) {
-        console.error("Error getting proposal counts:", error);
+        console.error("Error counting proposals:", error);
       }
       
-      // 4. Get delegation and participation rates
+      // 4. Estimate participation and delegation rates
+      let participationRate = 0;
+      let delegationRate = 0;
+      
       try {
-        // Try to get delegation rate from snapshot metrics
-        if (typeof this.tokenContract.getCurrentSnapshotId === 'function') {
-          const snapshotId = await this.tokenContract.getCurrentSnapshotId();
+        // Try to get snapshot metrics if available
+        if (typeof contracts.justToken.getCurrentSnapshotId === 'function') {
+          const snapshotId = await contracts.justToken.getCurrentSnapshotId();
           
-          if (typeof this.tokenContract.getSnapshotMetrics === 'function') {
+          if (typeof contracts.justToken.getSnapshotMetrics === 'function') {
             try {
-              const metrics = await this.tokenContract.getSnapshotMetrics(snapshotId);
+              const metrics = await contracts.justToken.getSnapshotMetrics(snapshotId);
               
-              // Different contracts may return metrics in different formats
-              if (metrics && metrics.length >= 5) {
-                // Likely array return format
-                delegationRate = parseFloat(metrics[4].toString()) / 10000; // Convert from basis points
+              // Extract metrics based on return type
+              if (Array.isArray(metrics)) {
+                // Array format - typically index 4 is delegation percentage
+                delegationRate = metrics[4] ? parseFloat(metrics[4].toString()) / 10000 : 0;
               } else if (metrics && metrics.percentageDelegated) {
-                // Object return format
+                // Object format
                 delegationRate = parseFloat(metrics.percentageDelegated.toString()) / 10000;
               }
             } catch (err) {
@@ -681,33 +645,29 @@ class BlockchainDataService {
           }
         }
         
-        // Estimate participation rate from recent votes
-        if (this.governanceContract) {
-          // Get recent VoteCast events
-          const filter = this.governanceContract.filters.VoteCast();
-          const blockNumber = await this.provider.getBlockNumber();
-          const fromBlock = Math.max(0, blockNumber - 50000);
-          
-          const voteEvents = await this.governanceContract.queryFilter(filter, fromBlock);
-          
-          if (voteEvents.length > 0) {
-            // Count unique voters
-            const uniqueVoters = new Set();
-            for (const event of voteEvents) {
-              if (event.args && event.args.voter) {
-                uniqueVoters.add(event.args.voter.toLowerCase());
-              }
-            }
-            
-            // Estimate participation rate based on unique voters vs total holders
-            if (totalHolders > 0) {
-              participationRate = uniqueVoters.size / totalHolders;
-            }
+        // Estimate participation rate from VoteCast events
+        const voteFilter = contracts.governance.filters.VoteCast();
+        const voteEvents = await contracts.governance.queryFilter(voteFilter);
+        
+        // Count unique voters
+        const uniqueVoters = new Set();
+        
+        for (const event of voteEvents) {
+          if (event.args && event.args.voter) {
+            uniqueVoters.add(event.args.voter.toLowerCase());
           }
         }
+        
+        // Estimate participation as unique voters / total holders
+        participationRate = totalHolders > 0 ? uniqueVoters.size / totalHolders : 0;
       } catch (error) {
-        console.error("Error estimating participation and delegation rates:", error);
+        console.error("Error estimating participation/delegation rates:", error);
       }
+      
+      // Format percentages
+      const formattedParticipationRate = `${(participationRate * 100).toFixed(1)}%`;
+      const formattedDelegationRate = `${(delegationRate * 100).toFixed(1)}%`;
+      const formattedSuccessRate = `${(proposalSuccessRate * 100).toFixed(1)}%`;
       
       const stats = {
         totalHolders,
@@ -717,16 +677,13 @@ class BlockchainDataService {
         participationRate,
         delegationRate,
         proposalSuccessRate,
-        formattedParticipationRate: `${(participationRate * 100).toFixed(1)}%`,
-        formattedDelegationRate: `${(delegationRate * 100).toFixed(1)}%`,
-        formattedSuccessRate: `${(proposalSuccessRate * 100).toFixed(1)}%`,
-        isLoading: false
+        formattedParticipationRate,
+        formattedDelegationRate,
+        formattedSuccessRate
       };
       
-      console.log("Final DAO stats:", stats);
-      
-      // Update cache
-      this.updateCache('stats', null, stats);
+      // Cache the result
+      blockchainDataCache.set(cacheKey, stats);
       
       return stats;
     } catch (error) {
@@ -741,25 +698,131 @@ class BlockchainDataService {
         proposalSuccessRate: 0,
         formattedParticipationRate: "0.0%",
         formattedDelegationRate: "0.0%",
-        formattedSuccessRate: "0.0%",
-        isLoading: false
+        formattedSuccessRate: "0.0%"
       };
     }
-  }
-}
+  }, [contractsReady, isConnected, contracts, provider]);
 
-// Create singleton instance
-let instance = null;
+  // Fetch user data function
+  const fetchUserData = useCallback(async () => {
+    if (!contractsReady || !isConnected || !account) return;
+    
+    try {
+      setIsLoading(true);
+      
+      // Get balance
+      const balance = await getTokenBalance(account);
+      
+      // Get delegation info
+      const delegationInfo = await getDelegationInfo(account);
+      
+      // Get voting power
+      const votingPower = await getVotingPower(account);
+      
+      // Get voted proposals
+      const votedProposals = await getVotedProposals();
+      
+      // Update user data state
+      setUserData({
+        address: account,
+        balance,
+        votingPower,
+        delegate: delegationInfo.currentDelegate,
+        lockedTokens: delegationInfo.lockedTokens,
+        delegatedToYou: delegationInfo.delegatedToYou,
+        delegators: delegationInfo.delegators,
+        hasVotedProposals: votedProposals
+      });
+      
+    } catch (error) {
+      console.error("Error fetching user data:", error);
+      setError("Failed to load user data from blockchain");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [
+    contractsReady, 
+    isConnected, 
+    account, 
+    getTokenBalance, 
+    getDelegationInfo, 
+    getVotingPower, 
+    getVotedProposals
+  ]);
 
-export const getBlockchainDataService = (web3Context, contracts) => {
-  if (!instance) {
-    instance = new BlockchainDataService(web3Context, contracts);
-  } else if (web3Context || contracts) {
-    // Update the instance with new context if provided
-    instance.initialize(web3Context, contracts);
-  }
-  return instance;
+  // Function to manually refresh data and clear cache
+  const refreshData = useCallback(() => {
+    // Clear the cache
+    blockchainDataCache.clear();
+    
+    // Increment refresh counter to trigger re-fetching
+    setManualRefreshCounter(prev => prev + 1);
+  }, []);
+
+  // Load all data when connected and contracts ready
+  useEffect(() => {
+    if (isConnected && contractsReady) {
+      console.log("Loading blockchain data...");
+      
+      // Load all data with slight staggered timing to avoid overwhelming RPC
+      const loadData = async () => {
+        try {
+          setIsLoading(true);
+          
+          // Fetch user data first
+          await fetchUserData();
+          
+          // Small delay
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
+          // Fetch DAO stats
+          const stats = await fetchDAOStats();
+          setDaoStats(stats);
+          
+        } catch (error) {
+          console.error("Error loading blockchain data:", error);
+          setError("Failed to load data from blockchain");
+        } finally {
+          setIsLoading(false);
+        }
+      };
+      
+      loadData();
+    }
+  }, [
+    isConnected, 
+    contractsReady, 
+    fetchUserData, 
+    fetchDAOStats, 
+    refreshCounter, 
+    manualRefreshCounter,
+    account
+  ]);
+
+  // Context value
+  const value = {
+    userData,
+    daoStats,
+    isLoading,
+    error,
+    refreshData,
+    hasVoted,
+    getProposalVoteTotals,
+    getDetailedProposalVotes
+  };
+
+  return (
+    <BlockchainDataContext.Provider value={value}>
+      {children}
+    </BlockchainDataContext.Provider>
+  );
 };
 
-
-export default BlockchainDataService;
+// Custom hook to use the context
+export const useBlockchainData = () => {
+  const context = useContext(BlockchainDataContext);
+  if (!context) {
+    throw new Error('useBlockchainData must be used within a BlockchainDataProvider');
+  }
+  return context;
+};

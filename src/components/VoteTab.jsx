@@ -577,18 +577,30 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
     if (voteData) {
       // Ensure all properties have the right type
       return {
+        // Note: In the contract, yesVotes/noVotes/abstainVotes represent voting power
         yesVotes: parseFloat(voteData.yesVotes) || 0,
         noVotes: parseFloat(voteData.noVotes) || 0,
         abstainVotes: parseFloat(voteData.abstainVotes) || 0,
-        totalVotes: voteData.totalVoters || 0,
+        
+        // Store voting power explicitly (these values are the same as the votes values)
         yesVotingPower: parseFloat(voteData.yesVotingPower || voteData.yesVotes) || 0,
         noVotingPower: parseFloat(voteData.noVotingPower || voteData.noVotes) || 0,
         abstainVotingPower: parseFloat(voteData.abstainVotingPower || voteData.abstainVotes) || 0,
-        totalVotingPower: parseFloat(voteData.totalVotingPower) || 0,
+        
+        // Total votes and voting power
+        totalVotes: voteData.totalVoters || 0,
+        totalVotingPower: parseFloat(voteData.totalVotingPower) || 
+          parseFloat(voteData.yesVotes) + parseFloat(voteData.noVotes) + parseFloat(voteData.abstainVotes) || 0,
+        
+        // Number of unique voters
         totalVoters: voteData.totalVoters || 0,
+        
+        // Percentages based on voting power
         yesPercentage: voteData.yesPercentage || 0,
         noPercentage: voteData.noPercentage || 0,
         abstainPercentage: voteData.abstainPercentage || 0,
+        
+        // Additional metadata
         source: voteData.source || 'state',
         isPending: voteData.includesPending || false
       };
@@ -623,21 +635,21 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
       const yesVotes = parseFloat(proposal.yesVotes) || 0;
       const noVotes = parseFloat(proposal.noVotes) || 0;
       const abstainVotes = parseFloat(proposal.abstainVotes) || 0;
-      const totalVotes = yesVotes + noVotes + abstainVotes;
+      const totalVotingPower = yesVotes + noVotes + abstainVotes;
       
       return {
-        yesVotes: yesVotes,
-        noVotes: noVotes,
-        abstainVotes: abstainVotes,
-        totalVotes: totalVotes,
+        yesVotes,
+        noVotes,
+        abstainVotes,
         yesVotingPower: yesVotes,
         noVotingPower: noVotes,
         abstainVotingPower: abstainVotes,
-        totalVotingPower: totalVotes,
-        totalVoters: totalVotes > 0 ? Math.round(totalVotes) : 0,
-        yesPercentage: totalVotes > 0 ? (yesVotes / totalVotes) * 100 : 0,
-        noPercentage: totalVotes > 0 ? (noVotes / totalVotes) * 100 : 0,
-        abstainPercentage: totalVotes > 0 ? (abstainVotes / totalVotes) * 100 : 0,
+        totalVotes: totalVotingPower > 0 ? Math.round(totalVotingPower) : 0,
+        totalVotingPower,
+        totalVoters: proposal.totalVoters || 0,
+        yesPercentage: totalVotingPower > 0 ? (yesVotes / totalVotingPower) * 100 : 0,
+        noPercentage: totalVotingPower > 0 ? (noVotes / totalVotingPower) * 100 : 0,
+        abstainPercentage: totalVotingPower > 0 ? (abstainVotes / totalVotingPower) * 100 : 0,
         source: 'proposal'
       };
     }
@@ -658,7 +670,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
       abstainPercentage: 0,
       source: 'empty'
     };
-  }, [proposalVotes, pendingVotes]);
+  }, [proposalVotes, pendingVotes, VOTE_TYPES]);
 
   // Render vote percentage bar based on voting power
   const renderVoteBar = useCallback((proposal) => {
