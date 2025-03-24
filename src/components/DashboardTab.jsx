@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Clock, ArrowRight } from 'lucide-react';
 import { formatPercentage, formatCountdown } from '../utils/formatters';
 import Loader from './Loader';
+import blockchainDataCache from '../utils/blockchainDataCache';
 
 const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }) => {
   // Format numbers for display
@@ -48,20 +49,62 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
     const fetchVoteData = async () => {
       if (!getProposalVoteTotals || !proposals || proposals.length === 0) return;
       
+      console.log("Dashboard fetching vote data for all active proposals");
       const voteData = {};
-      for (const proposal of proposals) {
-        try {
-          const data = await getProposalVoteTotals(proposal.id);
-          voteData[proposal.id] = data;
-        } catch (error) {
-          console.error(`Error fetching vote data for proposal ${proposal.id}:`, error);
-        }
-      }
       
+      // Process proposals in parallel for better performance
+      const results = await Promise.allSettled(
+        proposals.map(async (proposal) => {
+          try {
+            // Check if cached data is available first
+            const cacheKey = `dashboard-votes-${proposal.id}`;
+            const cachedData = blockchainDataCache.get(cacheKey);
+            if (cachedData !== null) {
+              return {
+                id: proposal.id,
+                data: cachedData
+              };
+            }
+            
+            console.log(`Fetching vote data for proposal #${proposal.id}`);
+            const data = await getProposalVoteTotals(proposal.id);
+            
+            // Cache the result
+            blockchainDataCache.set(cacheKey, data);
+            
+            return {
+              id: proposal.id,
+              data
+            };
+          } catch (error) {
+            console.error(`Error fetching vote data for proposal ${proposal.id}:`, error);
+            return {
+              id: proposal.id,
+              data: null
+            };
+          }
+        })
+      );
+      
+      // Collect successful results
+      results.forEach(result => {
+        if (result.status === 'fulfilled' && result.value && result.value.data) {
+          voteData[result.value.id] = result.value.data;
+        }
+      });
+      
+      console.log("Setting proposalVoteData state with:", voteData);
       setProposalVoteData(voteData);
     };
     
     fetchVoteData();
+    
+    // Set up a polling interval to refresh vote data
+    const pollInterval = setInterval(fetchVoteData, 30000); // Every 30 seconds
+    
+    return () => {
+      clearInterval(pollInterval);
+    };
   }, [proposals, getProposalVoteTotals]);
   
   return (
@@ -167,7 +210,7 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
         <div className="space-y-4">
           {proposals && proposals.length > 0 ? (
             proposals.map((proposal, idx) => {
-              // Get vote data from our new hook method
+              // Get vote data from our state
               const voteData = proposalVoteData[proposal.id] || {
                 yesVotes: parseFloat(proposal.yesVotes) || 0,
                 noVotes: parseFloat(proposal.noVotes) || 0,
@@ -178,13 +221,21 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
                 abstainPercentage: 0
               };
               
-              // If no vote data is available yet, calculate percentages
-              if (!voteData.yesPercentage) {
-                const totalVotes = voteData.yesVotes + voteData.noVotes + voteData.abstainVotes;
-                voteData.yesPercentage = totalVotes > 0 ? (voteData.yesVotes / totalVotes) * 100 : 0;
-                voteData.noPercentage = totalVotes > 0 ? (voteData.noVotes / totalVotes) * 100 : 0;
-                voteData.abstainPercentage = totalVotes > 0 ? (voteData.abstainVotes / totalVotes) * 100 : 0;
+              // If no percentages are available in vote data, calculate them
+              if (!voteData.yesPercentage && !voteData.noPercentage && !voteData.abstainPercentage) {
+                const totalVotes = parseFloat(voteData.yesVotes) + parseFloat(voteData.noVotes) + parseFloat(voteData.abstainVotes);
+                
+                if (totalVotes > 0) {
+                  voteData.yesPercentage = (parseFloat(voteData.yesVotes) / totalVotes) * 100;
+                  voteData.noPercentage = (parseFloat(voteData.noVotes) / totalVotes) * 100;
+                  voteData.abstainPercentage = (parseFloat(voteData.abstainVotes) / totalVotes) * 100;
+                }
               }
+              
+              // Ensure we have voting power values for the display
+              voteData.yesVotingPower = parseFloat(voteData.yesVotingPower || voteData.yesVotes) || 0;
+              voteData.noVotingPower = parseFloat(voteData.noVotingPower || voteData.noVotes) || 0;
+              voteData.abstainVotingPower = parseFloat(voteData.abstainVotingPower || voteData.abstainVotes) || 0;
               
               return (
                 <div key={idx} className="p-4 border border-gray-200 rounded-lg">
@@ -198,11 +249,15 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
                       {formatCountdown(proposal.deadline)}
                     </span>
                   </div>
+                  
+                  {/* Vote percentages */}
                   <div className="flex justify-between text-sm mb-2">
                     <span>Yes: {voteData.yesPercentage.toFixed(1)}%</span>
                     <span>No: {voteData.noPercentage.toFixed(1)}%</span>
                     <span>Abstain: {voteData.abstainPercentage.toFixed(1)}%</span>
                   </div>
+                  
+                  {/* Vote bar */}
                   <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
                     <div className="flex h-full">
                       <div className="bg-green-500 h-full" style={{ width: `${voteData.yesPercentage}%` }}></div>
@@ -211,12 +266,14 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
                     </div>
                   </div>
                   
-                  {/* Vote totals and total voters - NEW */}
+                  {/* Vote totals and voting power - Enhanced display */}
                   <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mt-2">
-                    <div>{Math.round(voteData.yesVotes)} votes</div>
-                    <div className="text-center">{Math.round(voteData.noVotes)} votes</div>
-                    <div className="text-right">{Math.round(voteData.abstainVotes)} votes</div>
+                    <div>{Math.round(voteData.yesVotingPower)} JUST</div>
+                    <div className="text-center">{Math.round(voteData.noVotingPower)} JUST</div>
+                    <div className="text-right">{Math.round(voteData.abstainVotingPower)} JUST</div>
                   </div>
+                  
+                  {/* Total voters count */}
                   <div className="text-xs text-gray-500 mt-1 text-right">
                     Total voters: {voteData.totalVoters || 0}
                   </div>

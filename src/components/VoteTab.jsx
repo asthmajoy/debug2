@@ -5,6 +5,7 @@ import { Clock, Check, X, X as XIcon, Calendar, Users, BarChart2 } from 'lucide-
 import { PROPOSAL_STATES, VOTE_TYPES } from '../utils/constants';
 import { formatCountdown } from '../utils/formatters';
 import Loader from './Loader';
+import blockchainDataCache from '../utils/blockchainDataCache';
 
 const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVoteTotals, voting, account, governanceContract, provider, contractAddress }) => {
   const [voteFilter, setVoteFilter] = useState('active');
@@ -26,6 +27,13 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
       if (!governanceContract || !provider) {
         console.error("Governance contract or provider not available");
         return null;
+      }
+      
+      // Check cache first
+      const cacheKey = `eventVotes-${proposalId}`;
+      const cachedData = blockchainDataCache.get(cacheKey);
+      if (cachedData !== null) {
+        return cachedData;
       }
       
       console.log(`Querying blockchain events for proposal #${proposalId}...`);
@@ -99,7 +107,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
       const noPercentage = totalVotingPower > 0 ? (votingPowerByType[0] / totalVotingPower) * 100 : 0;
       const abstainPercentage = totalVotingPower > 0 ? (votingPowerByType[2] / totalVotingPower) * 100 : 0;
       
-      return {
+      const result = {
         yesVotes: votesByType[1],
         noVotes: votesByType[0],
         abstainVotes: votesByType[2],
@@ -114,6 +122,11 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
         abstainPercentage,
         source: 'events'
       };
+      
+      // Cache the result
+      blockchainDataCache.set(cacheKey, result);
+      
+      return result;
     } catch (error) {
       console.error("Error querying blockchain events:", error);
       return null;
@@ -123,25 +136,23 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
   // Function to fetch proposal vote data combining multiple sources
   const fetchProposalVotes = useCallback(async (proposalId) => {
     try {
-      if (!governanceContract || !getProposalVoteTotals) {
+      if (!proposalId || !getProposalVoteTotals) {
         return null;
       }
       
-      console.log(`Fetching vote data for proposal #${proposalId}`);
+      console.log(`Fetching vote data for proposal #${proposalId} from blockchain`);
       
-      // Try different methods to get vote data - start with most reliable
-      let blockchainData = null;
+      // Use the context function to get vote data - this pulls from blockchain
+      let blockchainData = await getProposalVoteTotals(proposalId);
+      console.log(`Got vote data from blockchain for proposal #${proposalId}:`, blockchainData);
       
-      // 1. First try direct contract call to getProposalVotes
-      try {
-        blockchainData = await getProposalVoteTotals(proposalId);
-        console.log(`Got vote data from contract for proposal #${proposalId}:`, blockchainData);
-      } catch (error) {
-        console.warn(`Error calling getProposalVoteTotals for proposal #${proposalId}:`, error);
-      }
-      
-      // 2. If that fails, try getting data from blockchain events
-      if (!blockchainData) {
+      // Check if we got valid data
+      if (!blockchainData || (parseFloat(blockchainData.yesVotes) === 0 && 
+                             parseFloat(blockchainData.noVotes) === 0 && 
+                             parseFloat(blockchainData.abstainVotes) === 0 && 
+                             blockchainData.totalVoters === 0)) {
+        
+        // If no data from context function, try fallback method
         try {
           blockchainData = await getEventBasedVoteData(proposalId);
           console.log(`Got vote data from events for proposal #${proposalId}:`, blockchainData);
@@ -150,7 +161,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
         }
       }
       
-      // Check if we got data from either method
+      // If we still don't have data, return null
       if (!blockchainData) {
         console.warn(`Could not get blockchain data for proposal #${proposalId}`);
         return null;
@@ -166,41 +177,41 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
         
         // Only apply the pending vote if it's not already counted in blockchain data
         if (!votedProposals[proposalId] || blockchainData.totalVoters === 0) {
+          const userVotingPower = parseFloat(pendingVote.votingPower) || 1;
+          
           // Add the pending vote to the appropriate category
           if (pendingVote.voteType === VOTE_TYPES.FOR) {
-            voteData.yesVotes += 1;
-            voteData.yesVotingPower += pendingVote.votingPower || 1;
+            voteData.yesVotes = (parseFloat(voteData.yesVotes) + userVotingPower).toString();
+            voteData.yesVotingPower = (parseFloat(voteData.yesVotingPower || voteData.yesVotes) + userVotingPower).toString();
           } else if (pendingVote.voteType === VOTE_TYPES.AGAINST) {
-            voteData.noVotes += 1;
-            voteData.noVotingPower += pendingVote.votingPower || 1;
+            voteData.noVotes = (parseFloat(voteData.noVotes) + userVotingPower).toString();
+            voteData.noVotingPower = (parseFloat(voteData.noVotingPower || voteData.noVotes) + userVotingPower).toString();
           } else if (pendingVote.voteType === VOTE_TYPES.ABSTAIN) {
-            voteData.abstainVotes += 1;
-            voteData.abstainVotingPower += pendingVote.votingPower || 1;
+            voteData.abstainVotes = (parseFloat(voteData.abstainVotes) + userVotingPower).toString();
+            voteData.abstainVotingPower = (parseFloat(voteData.abstainVotingPower || voteData.abstainVotes) + userVotingPower).toString();
           }
           
           // Update totals
-          voteData.totalVotes += 1;
-          voteData.totalVoters += 1;
-          voteData.totalVotingPower += pendingVote.votingPower || 1;
+          voteData.totalVoters = (voteData.totalVoters || 0) + 1;
+          voteData.totalVotingPower = (parseFloat(voteData.totalVotingPower || "0") + userVotingPower).toString();
           
           // Recalculate percentages
-          const totalVotingPower = voteData.totalVotingPower || 1;
-          voteData.yesPercentage = (voteData.yesVotingPower / totalVotingPower) * 100;
-          voteData.noPercentage = (voteData.noVotingPower / totalVotingPower) * 100;
-          voteData.abstainPercentage = (voteData.abstainVotingPower / totalVotingPower) * 100;
+          const totalVotingPower = parseFloat(voteData.totalVotingPower) || 1;
+          voteData.yesPercentage = (parseFloat(voteData.yesVotingPower || voteData.yesVotes) / totalVotingPower) * 100;
+          voteData.noPercentage = (parseFloat(voteData.noVotingPower || voteData.noVotes) / totalVotingPower) * 100;
+          voteData.abstainPercentage = (parseFloat(voteData.abstainVotingPower || voteData.abstainVotes) / totalVotingPower) * 100;
           
           // Mark as including optimistic updates
           voteData.includesPending = true;
         }
       }
       
-      // Return the combined data
       return voteData;
     } catch (error) {
       console.error(`Error fetching votes for proposal #${proposalId}:`, error);
       return null;
     }
-  }, [getProposalVoteTotals, getEventBasedVoteData, governanceContract, pendingVotes, votedProposals]);
+  }, [getProposalVoteTotals, getEventBasedVoteData, pendingVotes, votedProposals]);
 
   // Poll for updated vote data with exponential backoff after a vote
   const refreshProposalWithBackoff = useCallback(async (proposalId) => {
@@ -243,8 +254,10 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
     
     setLoading(true);
     try {
+      console.log("Refreshing all proposal vote data...");
+      
       // Fetch data for all proposals
-      const results = await Promise.all(
+      const results = await Promise.allSettled(
         proposals.map(async (proposal) => {
           try {
             return { 
@@ -263,13 +276,14 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
       let hasUpdates = false;
       
       results.forEach(result => {
-        if (result.data) {
-          newVotes[result.id] = result.data;
+        if (result.status === 'fulfilled' && result.value && result.value.data) {
+          newVotes[result.value.id] = result.value.data;
           hasUpdates = true;
         }
       });
       
       if (hasUpdates) {
+        console.log("Updating proposalVotes state with new data");
         setProposalVotes(newVotes);
       }
     } catch (error) {
@@ -287,10 +301,10 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
     // Initial load
     refreshAllProposals();
     
-    // Setup polling interval
+    // Setup polling interval - every 15 seconds to avoid overwhelming the RPC
     const pollInterval = setInterval(() => {
       refreshAllProposals();
-    }, 10000); // Poll every 10 seconds
+    }, 15000);
     
     return () => {
       clearInterval(pollInterval);
@@ -306,8 +320,19 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
       for (const proposal of proposals) {
         try {
           if (proposal.snapshotId) {
+            // Try to get from cache first
+            const cacheKey = `votingPower-${account}-${proposal.snapshotId}`;
+            const cachedPower = blockchainDataCache.get(cacheKey);
+            if (cachedPower !== null) {
+              powers[proposal.id] = cachedPower;
+              continue;
+            }
+            
             const power = await getVotingPower(proposal.snapshotId);
             powers[proposal.id] = power;
+            
+            // Cache the result
+            blockchainDataCache.set(cacheKey, power);
           }
         } catch (err) {
           console.error(`Error getting voting power for proposal ${proposal.id}:`, err);
@@ -343,6 +368,14 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
       if (!governanceContract) return;
       
       try {
+        // Try to get from cache first
+        const cacheKey = 'quorum';
+        const cachedQuorum = blockchainDataCache.get(cacheKey);
+        if (cachedQuorum !== null) {
+          setQuorum(cachedQuorum);
+          return;
+        }
+        
         // Call the governanceContract to get the govParams
         const params = await governanceContract.govParams();
         if (params && params.quorum) {
@@ -350,6 +383,9 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
           const quorumValue = parseInt(params.quorum.toString());
           setQuorum(quorumValue);
           console.log("Fetched quorum:", quorumValue);
+          
+          // Cache the result
+          blockchainDataCache.set(cacheKey, quorumValue);
         }
       } catch (error) {
         console.error("Error fetching quorum:", error);
@@ -461,20 +497,20 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
       // We don't want to double-count votes
       if (!hasUserVoted(proposal)) {
         if (support === VOTE_TYPES.FOR) {
-          optimisticVotes.yesVotes += 1;
-          optimisticVotes.yesVotingPower += userVotingPower;
+          optimisticVotes.yesVotes = parseFloat(optimisticVotes.yesVotes || 0) + 1;
+          optimisticVotes.yesVotingPower = parseFloat(optimisticVotes.yesVotingPower || 0) + userVotingPower;
         } else if (support === VOTE_TYPES.AGAINST) {
-          optimisticVotes.noVotes += 1;
-          optimisticVotes.noVotingPower += userVotingPower;
+          optimisticVotes.noVotes = parseFloat(optimisticVotes.noVotes || 0) + 1;
+          optimisticVotes.noVotingPower = parseFloat(optimisticVotes.noVotingPower || 0) + userVotingPower;
         } else {
-          optimisticVotes.abstainVotes += 1;
-          optimisticVotes.abstainVotingPower += userVotingPower;
+          optimisticVotes.abstainVotes = parseFloat(optimisticVotes.abstainVotes || 0) + 1;
+          optimisticVotes.abstainVotingPower = parseFloat(optimisticVotes.abstainVotingPower || 0) + userVotingPower;
         }
         
         // Update totals
-        optimisticVotes.totalVotes += 1;
-        optimisticVotes.totalVoters += 1;
-        optimisticVotes.totalVotingPower += userVotingPower;
+        optimisticVotes.totalVotes = parseFloat(optimisticVotes.totalVotes || 0) + 1;
+        optimisticVotes.totalVoters = (optimisticVotes.totalVoters || 0) + 1;
+        optimisticVotes.totalVotingPower = parseFloat(optimisticVotes.totalVotingPower || 0) + userVotingPower;
         
         // Recalculate percentages
         const totalVotingPower = optimisticVotes.totalVotingPower || 1;
@@ -537,29 +573,72 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
     // Get data from the proposalVotes state
     const voteData = proposalVotes[proposal.id];
     
-    // If we have vote data, return it
+    // If we have vote data, return it with proper typing
     if (voteData) {
-      return voteData;
+      // Ensure all properties have the right type
+      return {
+        yesVotes: parseFloat(voteData.yesVotes) || 0,
+        noVotes: parseFloat(voteData.noVotes) || 0,
+        abstainVotes: parseFloat(voteData.abstainVotes) || 0,
+        totalVotes: voteData.totalVoters || 0,
+        yesVotingPower: parseFloat(voteData.yesVotingPower || voteData.yesVotes) || 0,
+        noVotingPower: parseFloat(voteData.noVotingPower || voteData.noVotes) || 0,
+        abstainVotingPower: parseFloat(voteData.abstainVotingPower || voteData.abstainVotes) || 0,
+        totalVotingPower: parseFloat(voteData.totalVotingPower) || 0,
+        totalVoters: voteData.totalVoters || 0,
+        yesPercentage: voteData.yesPercentage || 0,
+        noPercentage: voteData.noPercentage || 0,
+        abstainPercentage: voteData.abstainPercentage || 0,
+        source: voteData.source || 'state',
+        isPending: voteData.includesPending || false
+      };
     }
     
     // If we have a pending vote for this proposal, create synthetic data
     const pendingVote = pendingVotes[proposal.id];
     if (pendingVote) {
+      const userVotingPower = parseFloat(pendingVote.votingPower) || 1;
+      
       // Create synthetic data based on the pending vote
       return {
         yesVotes: pendingVote.voteType === VOTE_TYPES.FOR ? 1 : 0,
         noVotes: pendingVote.voteType === VOTE_TYPES.AGAINST ? 1 : 0,
         abstainVotes: pendingVote.voteType === VOTE_TYPES.ABSTAIN ? 1 : 0,
         totalVotes: 1,
-        yesVotingPower: pendingVote.voteType === VOTE_TYPES.FOR ? pendingVote.votingPower : 0,
-        noVotingPower: pendingVote.voteType === VOTE_TYPES.AGAINST ? pendingVote.votingPower : 0,
-        abstainVotingPower: pendingVote.voteType === VOTE_TYPES.ABSTAIN ? pendingVote.votingPower : 0,
-        totalVotingPower: pendingVote.votingPower,
+        yesVotingPower: pendingVote.voteType === VOTE_TYPES.FOR ? userVotingPower : 0,
+        noVotingPower: pendingVote.voteType === VOTE_TYPES.AGAINST ? userVotingPower : 0,
+        abstainVotingPower: pendingVote.voteType === VOTE_TYPES.ABSTAIN ? userVotingPower : 0,
+        totalVotingPower: userVotingPower,
         totalVoters: 1,
         yesPercentage: pendingVote.voteType === VOTE_TYPES.FOR ? 100 : 0,
         noPercentage: pendingVote.voteType === VOTE_TYPES.AGAINST ? 100 : 0,
         abstainPercentage: pendingVote.voteType === VOTE_TYPES.ABSTAIN ? 100 : 0,
-        isPending: true
+        isPending: true,
+        source: 'pending'
+      };
+    }
+    
+    // If the proposal has embedded vote data, use that (fallback)
+    if (proposal.yesVotes !== undefined || proposal.noVotes !== undefined || proposal.abstainVotes !== undefined) {
+      const yesVotes = parseFloat(proposal.yesVotes) || 0;
+      const noVotes = parseFloat(proposal.noVotes) || 0;
+      const abstainVotes = parseFloat(proposal.abstainVotes) || 0;
+      const totalVotes = yesVotes + noVotes + abstainVotes;
+      
+      return {
+        yesVotes: yesVotes,
+        noVotes: noVotes,
+        abstainVotes: abstainVotes,
+        totalVotes: totalVotes,
+        yesVotingPower: yesVotes,
+        noVotingPower: noVotes,
+        abstainVotingPower: abstainVotes,
+        totalVotingPower: totalVotes,
+        totalVoters: totalVotes > 0 ? Math.round(totalVotes) : 0,
+        yesPercentage: totalVotes > 0 ? (yesVotes / totalVotes) * 100 : 0,
+        noPercentage: totalVotes > 0 ? (noVotes / totalVotes) * 100 : 0,
+        abstainPercentage: totalVotes > 0 ? (abstainVotes / totalVotes) * 100 : 0,
+        source: 'proposal'
       };
     }
     
@@ -576,7 +655,8 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, getProposalVot
       totalVoters: 0,
       yesPercentage: 0,
       noPercentage: 0,
-      abstainPercentage: 0
+      abstainPercentage: 0,
+      source: 'empty'
     };
   }, [proposalVotes, pendingVotes]);
 
