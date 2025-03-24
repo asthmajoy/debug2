@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ethers } from 'ethers';
 
 import { Clock, Check, X, X as XIcon, Calendar, Users, BarChart2 } from 'lucide-react';
@@ -14,12 +14,198 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
   const [selectedProposal, setSelectedProposal] = useState(null);
   const [showModal, setShowModal] = useState(false);
   const [quorum, setQuorum] = useState(null);
+  const [proposalQuorums, setProposalQuorums] = useState({});
   const [proposalVoteData, setProposalVoteData] = useState({});
   
   // Track locally which proposals the user has voted on and how
   const [votedProposals, setVotedProposals] = useState({});
   // Track pending transactions to show optimistic UI updates
   const [pendingVotes, setPendingVotes] = useState({});
+  
+  /**
+   * Check if a proposal is inactive
+   * @param {Object} proposal - The proposal object
+   * @returns {boolean} - True if the proposal is inactive
+   */
+  const isInactiveProposal = useCallback((proposal) => {
+    // Check if proposal state is anything other than ACTIVE
+    return proposal.state !== PROPOSAL_STATES.ACTIVE;
+  }, [PROPOSAL_STATES]);
+
+  /**
+   * Get the cache key for a proposal's vote data
+   * @param {string} proposalId - The proposal ID
+   * @returns {string} - Cache key
+   */
+  const getVoteDataCacheKey = (proposalId) => {
+    return `dashboard-votes-${proposalId}`;
+  };
+
+  /**
+   * Get vote data for a proposal with special handling for inactive proposals
+   * @param {string} proposalId - The proposal ID
+   * @param {boolean} forceRefresh - Whether to force refresh from the blockchain
+   * @returns {Promise<Object>} - Vote data
+   */
+  const getProposalVoteDataWithCaching = async (proposalId, forceRefresh = false) => {
+    // Find the proposal
+    const proposal = proposals.find(p => p.id === proposalId);
+    if (!proposal) {
+      console.error(`Proposal #${proposalId} not found`);
+      return null;
+    }
+    
+    const cacheKey = getVoteDataCacheKey(proposalId);
+    
+    // For inactive proposals, prioritize cached data
+    if (isInactiveProposal(proposal) && !forceRefresh) {
+      const cachedData = blockchainDataCache.get(cacheKey);
+      if (cachedData) {
+        console.log(`Using cached data for inactive proposal #${proposalId}`);
+        return cachedData;
+      }
+    }
+    
+    // For active proposals or if we need to refresh, clear the cache
+    if (forceRefresh || !isInactiveProposal(proposal)) {
+      blockchainDataCache.delete(cacheKey);
+    }
+    
+    try {
+      // Get fresh data from the blockchain
+      console.log(`Fetching vote data for proposal #${proposalId}${isInactiveProposal(proposal) ? ' (inactive)' : ''}`);
+      const data = await getProposalVoteTotals(proposalId);
+      
+      if (!data) {
+        throw new Error(`No data returned for proposal #${proposalId}`);
+      }
+      
+      // Process the data consistently with Dashboard approach
+      const processedData = {
+        yesVotes: parseFloat(data.yesVotes) || 0,
+        noVotes: parseFloat(data.noVotes) || 0,
+        abstainVotes: parseFloat(data.abstainVotes) || 0,
+        yesVotingPower: parseFloat(data.yesVotes || data.yesVotingPower) || 0,
+        noVotingPower: parseFloat(data.noVotes || data.noVotingPower) || 0,
+        abstainVotingPower: parseFloat(data.abstainVotes || data.abstainVotingPower) || 0,
+        totalVoters: parseInt(data.totalVoters) || 0,
+        fetchedAt: Date.now()
+      };
+      
+      // Calculate total voting power
+      processedData.totalVotingPower = 
+        processedData.yesVotingPower + 
+        processedData.noVotingPower + 
+        processedData.abstainVotingPower;
+      
+      // Calculate percentages
+      if (processedData.totalVotingPower > 0) {
+        processedData.yesPercentage = (processedData.yesVotingPower / processedData.totalVotingPower) * 100;
+        processedData.noPercentage = (processedData.noVotingPower / processedData.totalVotingPower) * 100;
+        processedData.abstainPercentage = (processedData.abstainVotingPower / processedData.totalVotingPower) * 100;
+      } else {
+        processedData.yesPercentage = 0;
+        processedData.noPercentage = 0;
+        processedData.abstainPercentage = 0;
+      }
+      
+      // Set a TTL based on proposal state - longer for inactive
+      const ttlSeconds = isInactiveProposal(proposal) ? 86400 : 15; // 24 hours for inactive, 15 sec for active
+      
+      // Cache the result with appropriate TTL
+      blockchainDataCache.set(cacheKey, processedData, ttlSeconds);
+      
+      return processedData;
+    } catch (error) {
+      console.error(`Error fetching vote data for proposal ${proposalId}:`, error);
+      
+      // For inactive proposals, if we can't fetch new data, try to construct data from the proposal itself
+      if (isInactiveProposal(proposal)) {
+        console.log(`Constructing fallback data for inactive proposal #${proposalId}`);
+        const fallbackData = {
+          yesVotes: proposal.votedYes ? 1 : 0,
+          noVotes: proposal.votedNo ? 1 : 0,
+          abstainVotes: (proposal.hasVoted && !proposal.votedYes && !proposal.votedNo) ? 1 : 0,
+          yesVotingPower: parseFloat(proposal.yesVotes) || 0,
+          noVotingPower: parseFloat(proposal.noVotes) || 0,
+          abstainVotingPower: parseFloat(proposal.abstainVotes) || 0,
+          totalVoters: proposal.hasVoted ? 1 : 0,
+          fetchedAt: Date.now()
+        };
+        
+        // Calculate total voting power
+        fallbackData.totalVotingPower = 
+          fallbackData.yesVotingPower + 
+          fallbackData.noVotingPower + 
+          fallbackData.abstainVotingPower;
+        
+        // Calculate percentages
+        if (fallbackData.totalVotingPower > 0) {
+          fallbackData.yesPercentage = (fallbackData.yesVotingPower / fallbackData.totalVotingPower) * 100;
+          fallbackData.noPercentage = (fallbackData.noVotingPower / fallbackData.totalVotingPower) * 100;
+          fallbackData.abstainPercentage = (fallbackData.abstainVotingPower / fallbackData.totalVotingPower) * 100;
+        } else {
+          fallbackData.yesPercentage = 0;
+          fallbackData.noPercentage = 0;
+          fallbackData.abstainPercentage = 0;
+        }
+        
+        // Cache this fallback data with a long TTL
+        blockchainDataCache.set(cacheKey, fallbackData, 86400); // 24 hours
+        
+        return fallbackData;
+      }
+      
+      return null;
+    }
+  };
+
+  // Create a helper function to archive vote data when a proposal becomes inactive
+  const archiveProposalVoteData = async (proposalId) => {
+    const cacheKey = getVoteDataCacheKey(proposalId);
+    const cachedData = blockchainDataCache.get(cacheKey);
+    
+    if (cachedData) {
+      // If we already have data in the cache, update it with a long TTL
+      blockchainDataCache.set(cacheKey, cachedData, 86400); // 24 hours
+      console.log(`Archived vote data for proposal #${proposalId}`);
+    } else {
+      // Try to get fresh data one last time and archive it
+      try {
+        const data = await getProposalVoteTotals(proposalId);
+        if (data) {
+          const processedData = {
+            yesVotes: parseFloat(data.yesVotes) || 0,
+            noVotes: parseFloat(data.noVotes) || 0,
+            abstainVotes: parseFloat(data.abstainVotes) || 0,
+            yesVotingPower: parseFloat(data.yesVotes || data.yesVotingPower) || 0,
+            noVotingPower: parseFloat(data.noVotes || data.noVotingPower) || 0,
+            abstainVotingPower: parseFloat(data.abstainVotes || data.abstainVotingPower) || 0,
+            totalVoters: parseInt(data.totalVoters) || 0,
+            fetchedAt: Date.now()
+          };
+          
+          // Calculate total voting power
+          processedData.totalVotingPower = 
+            processedData.yesVotingPower + 
+            processedData.noVotingPower + 
+            processedData.abstainVotingPower;
+          
+          // Calculate percentages
+          if (processedData.totalVotingPower > 0) {
+            processedData.yesPercentage = (processedData.yesVotingPower / processedData.totalVotingPower) * 100;
+            processedData.noPercentage = (processedData.noVotingPower / processedData.totalVotingPower) * 100;
+            processedData.abstainPercentage = (processedData.abstainVotingPower / processedData.totalVotingPower) * 100;
+          }
+          
+          blockchainDataCache.set(cacheKey, processedData, 86400); // 24 hours
+          console.log(`Archived fresh vote data for proposal #${proposalId}`);
+        }
+      } catch (error) {
+        console.error(`Error archiving vote data for proposal ${proposalId}:`, error);
+      }
+    }
+  };
   
   // Format numbers for display - MATCHING DASHBOARD
   const formatNumberDisplay = (value) => {
@@ -57,106 +243,158 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     return numValue.toFixed(5);
   };
   
-  // Fetch vote data for all proposals - EXACTLY MATCHING DASHBOARD APPROACH
+  // Fetch vote data for all proposals - USING IMPROVED CACHING FOR INACTIVE PROPOSALS
   useEffect(() => {
     const fetchVoteData = async () => {
       if (!getProposalVoteTotals || !proposals || proposals.length === 0) return;
       
-      console.log("Dashboard fetching vote data for all active proposals");
-      const voteData = {};
+      console.log("Fetching vote data for all proposals");
+      setLoading(true);
       
-      // Process proposals in parallel for better performance
-      const results = await Promise.allSettled(
-        proposals.map(async (proposal) => {
-          try {
-            // Check if cached data is available first
-            const cacheKey = `dashboard-votes-${proposal.id}`;
-            const cachedData = blockchainDataCache.get(cacheKey);
-            if (cachedData !== null) {
+      try {
+        const voteData = {};
+        
+        // Process proposals in parallel for better performance
+        const results = await Promise.allSettled(
+          proposals.map(async (proposal) => {
+            try {
+              // Use our enhanced function that handles inactive proposals
+              const data = await getProposalVoteDataWithCaching(proposal.id, false);
+              if (!data) {
+                return {
+                  id: proposal.id,
+                  data: null
+                };
+              }
+              
               return {
                 id: proposal.id,
-                data: cachedData
+                data: data
+              };
+            } catch (error) {
+              console.error(`Error fetching vote data for proposal ${proposal.id}:`, error);
+              return {
+                id: proposal.id,
+                data: null
               };
             }
-            
-            console.log(`Fetching vote data for proposal #${proposal.id}`);
-            // Use the getProposalVoteTotals function from the context
-            const data = await getProposalVoteTotals(proposal.id);
-            
-            // Process the data to ensure consistent format - EXACTLY MATCHING DASHBOARD
-            const processedData = {
-              // Note: In the contract, yesVotes/noVotes/abstainVotes are actually voting power values
-              yesVotes: parseFloat(data.yesVotes) || 0,
-              noVotes: parseFloat(data.noVotes) || 0,
-              abstainVotes: parseFloat(data.abstainVotes) || 0,
-              yesVotingPower: parseFloat(data.yesVotes || data.yesVotingPower) || 0,
-              noVotingPower: parseFloat(data.noVotes || data.noVotingPower) || 0,
-              abstainVotingPower: parseFloat(data.abstainVotes || data.abstainVotingPower) || 0,
-              totalVoters: parseInt(data.totalVoters) || 0,
-              
-              // Store percentages based on voting power
-              yesPercentage: data.yesPercentage || 0,
-              noPercentage: data.noPercentage || 0,
-              abstainPercentage: data.abstainPercentage || 0,
-              
-              // Add a timestamp to know when the data was fetched
-              fetchedAt: Date.now()
-            };
-            
-            // Calculate total voting power
-            processedData.totalVotingPower = processedData.yesVotingPower + 
-                                            processedData.noVotingPower + 
-                                            processedData.abstainVotingPower;
-            
-            // If percentages aren't provided, calculate them based on voting power
-            if (!data.yesPercentage && !data.noPercentage && !data.abstainPercentage) {
-              if (processedData.totalVotingPower > 0) {
-                processedData.yesPercentage = (processedData.yesVotingPower / processedData.totalVotingPower) * 100;
-                processedData.noPercentage = (processedData.noVotingPower / processedData.totalVotingPower) * 100;
-                processedData.abstainPercentage = (processedData.abstainVotingPower / processedData.totalVotingPower) * 100;
-              }
-            }
-            
-            console.log(`Processed vote data for proposal #${proposal.id}:`, processedData);
-            
-            // Cache the result with a reasonable TTL
-            blockchainDataCache.set(cacheKey, processedData, 30); // Cache for 30 seconds
-            
-            return {
-              id: proposal.id,
-              data: processedData
-            };
-          } catch (error) {
-            console.error(`Error fetching vote data for proposal ${proposal.id}:`, error);
-            return {
-              id: proposal.id,
-              data: null
-            };
+          })
+        );
+        
+        // Collect successful results
+        results.forEach(result => {
+          if (result.status === 'fulfilled' && result.value && result.value.data) {
+            voteData[result.value.id] = result.value.data;
           }
-        })
-      );
-      
-      // Collect successful results
-      results.forEach(result => {
-        if (result.status === 'fulfilled' && result.value && result.value.data) {
-          voteData[result.value.id] = result.value.data;
-        }
-      });
-      
-      console.log("Setting proposalVoteData state with:", voteData);
-      setProposalVoteData(voteData);
+        });
+        
+        console.log("Setting proposalVoteData state with:", voteData);
+        setProposalVoteData(voteData);
+      } catch (error) {
+        console.error("Error fetching vote data:", error);
+      } finally {
+        setLoading(false);
+      }
     };
     
     // Initial fetch
     fetchVoteData();
     
-    // Set up a polling interval to refresh vote data - every 15 seconds as requested
-    const pollInterval = setInterval(fetchVoteData, 15000);
+    // Set up a polling interval to refresh vote data
+    // Only poll frequently for active proposals, less frequently for inactive ones 
+    const pollInterval = setInterval(() => {
+      // Count how many active proposals we have
+      const activeProposalCount = proposals.filter(p => !isInactiveProposal(p)).length;
+      
+      // If we have active proposals, refresh more frequently
+      if (activeProposalCount > 0) {
+        console.log(`Polling for ${activeProposalCount} active proposals`);
+        fetchVoteData();
+      } else {
+        // If all proposals are inactive, we still refresh occasionally but less frequently
+        const currentTime = Date.now();
+        const minutes = new Date(currentTime).getMinutes();
+        
+        // Only refresh once every 5 minutes for inactive proposals
+        if (minutes % 5 === 0) {
+          console.log("Occasional refresh for inactive proposals");
+          fetchVoteData();
+        }
+      }
+    }, 5000); // Poll every 5 seconds
+    
+    // Set up event listener for VoteCast events to update data in real-time
+    const setupEventListener = () => {
+      if (governanceContract) {
+        // Listen for VoteCast events
+        governanceContract.on('VoteCast', (voter, proposalId, support, votes, event) => {
+          console.log(`Vote cast by ${voter} on proposal ${proposalId}`);
+          
+          // Force immediate refresh of vote data
+          setTimeout(() => {
+            refreshVoteDataForProposal(proposalId.toString());
+          }, 1000);
+        });
+        
+        // Try to listen for ProposalState events if the contract supports it
+        try {
+          governanceContract.on('ProposalState', (proposalId, oldState, newState, event) => {
+            console.log(`Proposal ${proposalId} state changed from ${oldState} to ${newState}`);
+            
+            // If the proposal is no longer active, archive its vote data
+            if (newState !== PROPOSAL_STATES.ACTIVE) {
+              archiveProposalVoteData(proposalId.toString());
+            } else {
+              // If it became active, refresh its data
+              refreshVoteDataForProposal(proposalId.toString());
+            }
+          });
+        } catch (error) {
+          console.log("ProposalState event not supported by contract");
+        }
+        
+        console.log("Set up event listeners");
+      }
+    };
+    
+    setupEventListener();
     
     return () => {
       clearInterval(pollInterval);
+      // Remove event listeners
+      if (governanceContract) {
+        governanceContract.removeAllListeners('VoteCast');
+        // Try to remove ProposalState listener if it was added
+        try {
+          governanceContract.removeAllListeners('ProposalState');
+        } catch (error) {
+          // Ignore errors if the event wasn't supported
+        }
+      }
     };
-  }, [proposals, getProposalVoteTotals]);
+  }, [proposals, getProposalVoteTotals, governanceContract, isInactiveProposal]);
+
+  // Refresh vote data for a specific proposal - ensures sync with dashboard
+  const refreshVoteDataForProposal = async (proposalId) => {
+    if (!getProposalVoteTotals) return;
+    
+    try {
+      console.log(`Refreshing vote data for proposal #${proposalId}`);
+      
+      // Get fresh data with our enhanced function
+      const updatedData = await getProposalVoteDataWithCaching(proposalId, true);
+      
+      if (updatedData) {
+        // Update the state
+        setProposalVoteData(prev => ({
+          ...prev,
+          [proposalId]: updatedData
+        }));
+      }
+    } catch (error) {
+      console.error(`Error refreshing vote data for proposal ${proposalId}:`, error);
+    }
+  };
 
   // Fetch voting powers for each proposal
   useEffect(() => {
@@ -210,97 +448,56 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     });
     setVotedProposals(voted);
     
-    // Force refresh vote data when proposals change or when user votes on something
-    if (getProposalVoteTotals && proposals.length > 0) {
-      console.log("Triggering vote data refresh due to proposal change or new votes");
-      // This will ensure we reload vote data when proposals change
-      const refreshVoteData = async () => {
-        setLoading(true);
-        try {
-          const updatedVoteData = {};
-          
-          for (const proposal of proposals) {
-            try {
-              const data = await getProposalVoteTotals(proposal.id);
-              if (data) {
-                // Process the data consistently with Dashboard approach
-                const processedData = {
-                  yesVotes: parseFloat(data.yesVotes) || 0,
-                  noVotes: parseFloat(data.noVotes) || 0,
-                  abstainVotes: parseFloat(data.abstainVotes) || 0,
-                  yesVotingPower: parseFloat(data.yesVotes || data.yesVotingPower) || 0,
-                  noVotingPower: parseFloat(data.noVotes || data.noVotingPower) || 0,
-                  abstainVotingPower: parseFloat(data.abstainVotes || data.abstainVotingPower) || 0,
-                  totalVoters: parseInt(data.totalVoters) || 0,
-                  fetchedAt: Date.now()
-                };
-                
-                // Calculate total voting power
-                processedData.totalVotingPower = 
-                  processedData.yesVotingPower + 
-                  processedData.noVotingPower + 
-                  processedData.abstainVotingPower;
-                
-                // Calculate percentages
-                if (processedData.totalVotingPower > 0) {
-                  processedData.yesPercentage = (processedData.yesVotingPower / processedData.totalVotingPower) * 100;
-                  processedData.noPercentage = (processedData.noVotingPower / processedData.totalVotingPower) * 100;
-                  processedData.abstainPercentage = (processedData.abstainVotingPower / processedData.totalVotingPower) * 100;
-                } else {
-                  processedData.yesPercentage = 0;
-                  processedData.noPercentage = 0;
-                  processedData.abstainPercentage = 0;
-                }
-                
-                updatedVoteData[proposal.id] = processedData;
-                
-                // Update the cache too
-                blockchainDataCache.set(`dashboard-votes-${proposal.id}`, processedData, 30);
-              }
-            } catch (error) {
-              console.error(`Error refreshing vote data for proposal ${proposal.id}:`, error);
-            }
-          }
-          
-          setProposalVoteData(prev => ({
-            ...prev,
-            ...updatedVoteData
-          }));
-        } catch (error) {
-          console.error("Error refreshing vote data:", error);
-        } finally {
-          setLoading(false);
-        }
-      };
-      
-      refreshVoteData();
-    }
-  }, [proposals, getProposalVoteTotals, VOTE_TYPES]);
+    // Also ensure that inactive proposals have their vote data stored in the cache
+    proposals.filter(isInactiveProposal).forEach(proposal => {
+      archiveProposalVoteData(proposal.id);
+    });
+    
+  }, [proposals, isInactiveProposal, VOTE_TYPES]);
   
-  // Fetch quorum from governance contract
+  // Fetch quorum from governance contract - DIRECTLY ACCESS IT FROM THE CONTRACT
   useEffect(() => {
     const fetchQuorum = async () => {
       if (!governanceContract) return;
       
       try {
+        console.log("Attempting to fetch global quorum...");
         // Try to get from cache first
         const cacheKey = 'quorum';
         const cachedQuorum = blockchainDataCache.get(cacheKey);
         if (cachedQuorum !== null) {
+          console.log("Using cached quorum:", cachedQuorum);
           setQuorum(cachedQuorum);
           return;
         }
         
-        // Call the governanceContract to get the govParams
+        // Your contract stores quorum in the govParams structure
+        // This is the direct way to access it based on your contract
         const params = await governanceContract.govParams();
         if (params && params.quorum) {
-          // Convert from wei or other base units if necessary
+          // Convert to appropriate format
           const quorumValue = parseInt(params.quorum.toString());
+          console.log("Successfully fetched quorum from contract:", quorumValue);
           setQuorum(quorumValue);
-          console.log("Fetched quorum:", quorumValue);
           
           // Cache the result
-          blockchainDataCache.set(cacheKey, quorumValue);
+          blockchainDataCache.set(cacheKey, quorumValue, 3600); // Cache for 1 hour
+          
+          // Also store in proposal-specific quorums for each proposal
+          const updatedQuorums = {};
+          proposals.forEach(proposal => {
+            updatedQuorums[proposal.id] = quorumValue;
+            
+            // Also cache in proposal-specific keys
+            blockchainDataCache.set(`quorum-${proposal.id}`, quorumValue, 3600);
+          });
+          
+          setProposalQuorums(prev => ({
+            ...prev,
+            ...updatedQuorums
+          }));
+        } else {
+          console.error("Failed to get quorum: params or params.quorum is undefined", params);
         }
       } catch (error) {
         console.error("Error fetching quorum:", error);
@@ -308,7 +505,67 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     };
     
     fetchQuorum();
-  }, [governanceContract]);
+  }, [governanceContract, proposals]);
+
+  // Debug function to help diagnose quorum issues
+  const debugQuorum = async () => {
+    console.log("=== QUORUM DEBUG INFORMATION ===");
+    console.log("Current quorum state:", quorum);
+    console.log("Current proposalQuorums state:", proposalQuorums);
+    
+    // Check what's in the cache
+    const cachedGlobalQuorum = blockchainDataCache.get('quorum');
+    console.log("Cached global quorum:", cachedGlobalQuorum);
+    
+    // Loop through proposals and check their cached quorums
+    for (const proposal of proposals) {
+      const cacheKey = `quorum-${proposal.id}`;
+      const cachedValue = blockchainDataCache.get(cacheKey);
+      console.log(`Cached quorum for proposal #${proposal.id}:`, cachedValue);
+    }
+    
+    // Try to fetch directly from contract
+    if (governanceContract) {
+      try {
+        console.log("Attempting direct contract call to govParams()...");
+        const params = await governanceContract.govParams();
+        console.log("Raw govParams result:", params);
+        
+        if (params && params.quorum) {
+          console.log("Parsed quorum value:", parseInt(params.quorum.toString()));
+        }
+      } catch (error) {
+        console.error("Error in direct contract call:", error);
+      }
+      
+      // Try different ways to access the quorum
+      try {
+        // Check if quorum is available as a direct method
+        if (typeof governanceContract.quorum === 'function') {
+          const directQuorum = await governanceContract.quorum();
+          console.log("Direct quorum() call result:", directQuorum.toString());
+        } else {
+          console.log("quorum() is not a function on this contract");
+        }
+      } catch (error) {
+        console.log("Failed to call direct quorum() method:", error.message);
+      }
+    } else {
+      console.log("governanceContract is not available");
+    }
+    
+    console.log("=== END DEBUG INFORMATION ===");
+  };
+
+  // Log quorum info when modal opens
+  useEffect(() => {
+    if (showModal && selectedProposal) {
+      console.log("Modal opened for proposal:", selectedProposal.id);
+      console.log("Quorum for this proposal:", getQuorumForProposal(selectedProposal.id));
+      console.log("Global quorum state:", quorum);
+      console.log("Has proposal-specific quorum:", proposalQuorums[selectedProposal.id] !== undefined);
+    }
+  }, [showModal, selectedProposal]);
 
   // Filter proposals based on vote status
   const filteredProposals = proposals.filter(proposal => {
@@ -349,6 +606,34 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     return pendingVotes[proposalId] !== undefined && 
            (Date.now() - pendingVotes[proposalId].timestamp) < 60000; // Consider pending if less than 1 minute old
   }, [pendingVotes]);
+
+  // Get the quorum for a specific proposal - IMPROVED FALLBACK
+  const getQuorumForProposal = useCallback((proposalId) => {
+    // First check if we have a proposal-specific quorum
+    if (proposalQuorums[proposalId] !== undefined) {
+      return proposalQuorums[proposalId];
+    }
+    
+    // Otherwise use the global quorum
+    if (quorum !== null) {
+      return quorum;
+    }
+    
+    // As a last resort, pull from cache directly
+    const cachedQuorum = blockchainDataCache.get('quorum');
+    if (cachedQuorum !== null) {
+      return cachedQuorum;
+    }
+    
+    // If still nothing, try proposal-specific cache
+    const cachedProposalQuorum = blockchainDataCache.get(`quorum-${proposalId}`);
+    if (cachedProposalQuorum !== null) {
+      return cachedProposalQuorum;
+    }
+    
+    // Default fallback value if nothing else works
+    return 0;
+  }, [proposalQuorums, quorum]);
 
   // Function to submit a vote
   const submitVote = async (proposalId, support) => {
@@ -459,6 +744,9 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
           ...prev,
           [proposalId]: optimisticVoteData
         }));
+        
+        // Also clear the cache to ensure fresh data on next fetch
+        blockchainDataCache.delete(getVoteDataCacheKey(proposalId));
       }
       
       // Actually send the vote transaction to the blockchain
@@ -470,6 +758,16 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
         ...prev,
         [proposalId]: support
       }));
+      
+      // Force refresh after short delay to ensure blockchain has updated
+      setTimeout(() => {
+        refreshVoteDataForProposal(proposalId);
+      }, 2000);
+      
+      // Then set another refresh after a longer delay to catch any indexer updates
+      setTimeout(() => {
+        refreshVoteDataForProposal(proposalId);
+      }, 10000);
       
       return result;
     } catch (error) {
@@ -504,7 +802,13 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
       return voteData;
     }
     
-    // If not in state, create synthetic data using proposal data
+    // Check if we have data in the global cache with the exact dashboard key
+    const cachedData = blockchainDataCache.get(getVoteDataCacheKey(proposal.id));
+    if (cachedData) {
+      return cachedData;
+    }
+    
+    // If not in state or cache, create synthetic data using proposal data
     // This ensures we show something even before the blockchain data loads
     // EXACTLY MATCHING DASHBOARD APPROACH
     const syntheticData = {
@@ -599,29 +903,6 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     );
   }, [getVoteData]);
 
-  // Debug function to see what data we're getting
-  const debugVoteData = () => {
-    console.log("Current proposalVoteData state:", proposalVoteData);
-    
-    // Extract some key data for the first proposal
-    if (proposals && proposals.length > 0) {
-      const firstProposal = proposals[0];
-      const data = proposalVoteData[firstProposal.id];
-      
-      console.log(`Detailed data for Proposal #${firstProposal.id}:`, {
-        inState: !!data,
-        yesVotes: data ? data.yesVotes : 'N/A',
-        noVotes: data ? data.noVotes : 'N/A',
-        abstainVotes: data ? data.abstainVotes : 'N/A',
-        yesVotingPower: data ? data.yesVotingPower : 'N/A',
-        noVotingPower: data ? data.noVotingPower : 'N/A',
-        abstainVotingPower: data ? data.abstainVotingPower : 'N/A',
-        totalVoters: data ? data.totalVoters : 'N/A',
-        totalVotingPower: data ? data.totalVotingPower : 'N/A',
-      });
-    }
-  };
-
   // Trigger a manual refresh of vote data
   const refreshAllVoteData = async () => {
     if (!getProposalVoteTotals || !proposals || proposals.length === 0) return;
@@ -634,45 +915,11 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
       
       for (const proposal of proposals) {
         try {
-          const data = await getProposalVoteTotals(proposal.id);
+          // For inactive proposals, we don't need to force refresh since the data won't change
+          const forceRefresh = !isInactiveProposal(proposal);
+          const data = await getProposalVoteDataWithCaching(proposal.id, forceRefresh);
           if (data) {
-            console.log(`Raw vote data for proposal #${proposal.id}:`, data);
-            
-            // Process the data consistently with Dashboard approach
-            const processedData = {
-              yesVotes: parseFloat(data.yesVotes) || 0,
-              noVotes: parseFloat(data.noVotes) || 0,
-              abstainVotes: parseFloat(data.abstainVotes) || 0,
-              yesVotingPower: parseFloat(data.yesVotes || data.yesVotingPower) || 0,
-              noVotingPower: parseFloat(data.noVotes || data.noVotingPower) || 0,
-              abstainVotingPower: parseFloat(data.abstainVotes || data.abstainVotingPower) || 0,
-              totalVoters: parseInt(data.totalVoters) || 0,
-              fetchedAt: Date.now()
-            };
-            
-            // Calculate total voting power
-            processedData.totalVotingPower = 
-              processedData.yesVotingPower + 
-              processedData.noVotingPower + 
-              processedData.abstainVotingPower;
-            
-            // Calculate percentages
-            if (processedData.totalVotingPower > 0) {
-              processedData.yesPercentage = (processedData.yesVotingPower / processedData.totalVotingPower) * 100;
-              processedData.noPercentage = (processedData.noVotingPower / processedData.totalVotingPower) * 100;
-              processedData.abstainPercentage = (processedData.abstainVotingPower / processedData.totalVotingPower) * 100;
-            } else {
-              processedData.yesPercentage = 0;
-              processedData.noPercentage = 0;
-              processedData.abstainPercentage = 0;
-            }
-            
-            console.log(`Processed vote data for proposal #${proposal.id}:`, processedData);
-            
-            updatedVoteData[proposal.id] = processedData;
-            
-            // Update the cache too
-            blockchainDataCache.set(`dashboard-votes-${proposal.id}`, processedData, 30);
+            updatedVoteData[proposal.id] = data;
           }
         } catch (error) {
           console.error(`Error refreshing vote data for proposal ${proposal.id}:`, error);
@@ -710,13 +957,23 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
             </button>
           ))}
           
-          {/* Debug buttons - remove in production */}
+          {/* Refresh button */}
           <button
             className="ml-auto px-4 py-2 rounded-full text-sm bg-blue-100 text-blue-800"
             onClick={() => refreshAllVoteData()}
           >
             Refresh Data
           </button>
+          
+          {/* Debug button - only for development */}
+          {process.env.NODE_ENV === 'development' && (
+            <button
+              onClick={debugQuorum}
+              className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded"
+            >
+              Debug Quorum
+            </button>
+          )}
         </div>
       </div>
       
@@ -739,6 +996,9 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
             // Get vote data
             const voteData = getVoteData(proposal);
             const isPending = hasPendingVote(proposal.id);
+            
+            // Get quorum for this proposal
+            const proposalQuorum = getQuorumForProposal(proposal.id);
             
             return (
               <div key={idx} className="bg-white p-8 rounded-lg shadow-md">
@@ -815,19 +1075,19 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                           Your voting power: <span className="font-medium">{formatToFiveDecimals(votingPower)} JST</span>
                         </div>
                         
-                        {quorum && (
+                        {proposalQuorum > 0 && (
                           <div className="mt-5 mb-5">
                             <div className="flex justify-between text-sm text-gray-700 mb-2">
                               <span className="font-medium">Quorum Progress</span>
                               <span>
-                                {formatNumberDisplay(voteData.totalVotingPower || 0)} / {quorum ? formatNumberDisplay(quorum) : 0} JST
-                                ({Math.min(100, Math.round(((voteData.totalVotingPower || 0) / (quorum || 1)) * 100))}%)
+                                {formatNumberDisplay(voteData.totalVotingPower || 0)} / {formatNumberDisplay(proposalQuorum)} JST
+                                ({Math.min(100, Math.round(((voteData.totalVotingPower || 0) / (proposalQuorum || 1)) * 100))}%)
                               </span>
                             </div>
                             <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
                               <div 
                                 className="bg-blue-500 h-full rounded-full" 
-                                style={{ width: `${Math.min(100, ((voteData.totalVotingPower || 0) / (quorum || 1)) * 100)}%` }}
+                                style={{ width: `${Math.min(100, ((voteData.totalVotingPower || 0) / (proposalQuorum || 1)) * 100)}%` }}
                               ></div>
                             </div>
                           </div>
@@ -946,7 +1206,22 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                 <div className="flex items-center text-sm">
                   <BarChart2 className="w-4 h-4 mr-2 text-gray-500" />
                   <div>
-                    <span className="text-gray-600">Quorum:</span> {quorum ? `${formatNumberDisplay(quorum)} JST` : "Loading..."}
+                    <span className="text-gray-600">Quorum:</span>{" "}
+                    {(() => {
+                      const proposalQuorum = getQuorumForProposal(selectedProposal.id);
+                      if (proposalQuorum > 0) {
+                        return `${formatNumberDisplay(proposalQuorum)} JST`;
+                      } else if (quorum > 0) {
+                        return `${formatNumberDisplay(quorum)} JST`;
+                      } else {
+                        return "Loading...";
+                      }
+                    })()}
+                    {selectedProposal.snapshotId && (
+                      <span className="ml-1 text-xs text-gray-500">
+                        (Snapshot #{selectedProposal.snapshotId})
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -966,6 +1241,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                   {(() => {
                     const voteData = getVoteData(selectedProposal);
                     const isPending = hasPendingVote(selectedProposal.id);
+                    const proposalQuorum = getQuorumForProposal(selectedProposal.id);
                     
                     return (
                       <>
@@ -1008,6 +1284,32 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                         <div className="text-center text-xs text-gray-500 mt-3 mb-5">
                           Total voters: {voteData.totalVoters || 0}
                         </div>
+                        
+                        {/* Quorum progress */}
+                        {proposalQuorum > 0 && (
+                          <div className="mt-4 mb-5">
+                            <h5 className="text-sm font-medium mb-2">Quorum Progress</h5>
+                            <div className="flex justify-between text-xs text-gray-700 mb-2">
+                              <span className="font-medium">
+                                Current participation: {Math.min(100, Math.round(((voteData.totalVotingPower || 0) / (proposalQuorum || 1)) * 100))}%
+                              </span>
+                              <span>
+                                {formatNumberDisplay(voteData.totalVotingPower || 0)} / {formatNumberDisplay(proposalQuorum)} JST
+                              </span>
+                            </div>
+                            <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+                              <div 
+                                className="bg-blue-500 h-full rounded-full" 
+                                style={{ width: `${Math.min(100, ((voteData.totalVotingPower || 0) / (proposalQuorum || 1)) * 100)}%` }}
+                              ></div>
+                            </div>
+                            {selectedProposal.snapshotId && (
+                              <div className="text-xs text-gray-500 mt-1">
+                                Quorum calculated at snapshot #{selectedProposal.snapshotId}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         
                         {/* Voting power heading */}
                         <h5 className="text-sm font-medium mt-5 mb-3">Voting Power Distribution</h5>
