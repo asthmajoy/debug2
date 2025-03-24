@@ -4,6 +4,7 @@ import { ethers } from 'ethers';
 import { useWeb3 } from '../contexts/Web3Context';
 import { useBlockchainData } from '../contexts/BlockchainDataContext';
 import { VOTE_TYPES } from '../utils/constants';
+import blockchainDataCache from '../utils/blockchainDataCache';
 
 export function useVoting() {
   const { contracts, account, isConnected, contractsReady } = useWeb3();
@@ -22,6 +23,13 @@ export function useVoting() {
     if (!contracts.governance) return 0;
     
     try {
+      // Try to get from cache first
+      const cacheKey = `snapshot-${proposalId}`;
+      const cachedId = blockchainDataCache.get(cacheKey);
+      if (cachedId !== null) {
+        return cachedId;
+      }
+      
       // Try to find the creation event for this proposal
       const filter = contracts.governance.filters.ProposalEvent(proposalId, 0); // Type 0 is creation event
       const events = await contracts.governance.queryFilter(filter);
@@ -33,14 +41,24 @@ export function useVoting() {
         try {
           const data = creationEvent.args.data;
           const decoded = ethers.utils.defaultAbiCoder.decode(['uint8', 'uint256'], data);
-          return decoded[1].toNumber(); // The snapshotId is the second parameter
+          const snapshotId = decoded[1].toNumber(); // The snapshotId is the second parameter
+          
+          // Cache the result
+          blockchainDataCache.set(cacheKey, snapshotId);
+          
+          return snapshotId;
         } catch (decodeErr) {
           console.warn("Couldn't decode event data for snapshot ID:", decodeErr);
         }
       }
       
       // If we can't get it from events, try to get the current snapshot as fallback
-      return await contracts.justToken.getCurrentSnapshotId();
+      const currentSnapshot = await contracts.justToken.getCurrentSnapshotId();
+      
+      // Cache the result
+      blockchainDataCache.set(cacheKey, currentSnapshot);
+      
+      return currentSnapshot;
     } catch (err) {
       console.warn("Error getting proposal snapshot ID:", err);
       // Return the current snapshot as fallback
@@ -55,8 +73,21 @@ export function useVoting() {
 
   // Check if user has voted on a specific proposal - delegate to the context
   const hasVoted = useCallback(async (proposalId) => {
-    return await contextHasVoted(proposalId);
-  }, [contextHasVoted]);
+    // Try to get from cache first
+    const cacheKey = `hasVoted-${account}-${proposalId}`;
+    const cachedResult = blockchainDataCache.get(cacheKey);
+    if (cachedResult !== null) {
+      return cachedResult;
+    }
+    
+    // Get from context/blockchain if not cached
+    const result = await contextHasVoted(proposalId);
+    
+    // Cache the result
+    blockchainDataCache.set(cacheKey, result);
+    
+    return result;
+  }, [contextHasVoted, account]);
   
   // Get the voting power of the user for a specific snapshot
   const getVotingPower = useCallback(async (snapshotId) => {
@@ -64,6 +95,13 @@ export function useVoting() {
     if (!contracts.justToken) return "0";
     
     try {
+      // Try to get from cache first
+      const cacheKey = `votingPower-${account}-${snapshotId}`;
+      const cachedPower = blockchainDataCache.get(cacheKey);
+      if (cachedPower !== null) {
+        return cachedPower;
+      }
+      
       console.log(`Getting voting power for snapshot ${snapshotId}`);
       
       // If no snapshot ID is provided, get the current one
@@ -77,6 +115,10 @@ export function useVoting() {
       const formattedPower = ethers.utils.formatEther(votingPower);
       
       console.log(`Voting power at snapshot ${actualSnapshotId}: ${formattedPower}`);
+      
+      // Cache the result
+      blockchainDataCache.set(cacheKey, formattedPower);
+      
       return formattedPower;
     } catch (err) {
       console.error("Error getting voting power:", err);
@@ -91,11 +133,20 @@ export function useVoting() {
     }
     
     try {
+      // Try to get from cache first
+      const cacheKey = `voteDetails-${account}-${proposalId}`;
+      const cachedDetails = blockchainDataCache.get(cacheKey);
+      if (cachedDetails !== null) {
+        return cachedDetails;
+      }
+      
       // First check if the user has voted
       const voterInfo = await contracts.governance.proposalVoterInfo(proposalId, account);
       
       if (voterInfo.isZero()) {
-        return { hasVoted: false, votingPower: "0", voteType: null };
+        const result = { hasVoted: false, votingPower: "0", voteType: null };
+        blockchainDataCache.set(cacheKey, result);
+        return result;
       }
       
       // Try to determine how they voted by checking events
@@ -116,11 +167,16 @@ export function useVoting() {
         console.warn("Couldn't determine vote type from events:", err);
       }
       
-      return {
+      const result = {
         hasVoted: true,
         votingPower: votingPower,
         voteType: voteType
       };
+      
+      // Cache the result
+      blockchainDataCache.set(cacheKey, result);
+      
+      return result;
     } catch (err) {
       console.error("Error getting vote details:", err);
       return { hasVoted: false, votingPower: "0", voteType: null };
@@ -129,7 +185,30 @@ export function useVoting() {
 
   // Delegate to the context to get proposal vote totals
   const getProposalVoteTotals = useCallback(async (proposalId) => {
-    return await contextGetVoteTotals(proposalId);
+    try {
+      // Try to get from cache first
+      const cacheKey = `voteTotals-${proposalId}`;
+      const cachedTotals = blockchainDataCache.get(cacheKey);
+      if (cachedTotals !== null) {
+        return cachedTotals;
+      }
+      
+      // Get from context/blockchain if not cached
+      const result = await contextGetVoteTotals(proposalId);
+      
+      // Cache the result if it has meaningful data
+      if (result && (parseFloat(result.yesVotes) > 0 || 
+                     parseFloat(result.noVotes) > 0 || 
+                     parseFloat(result.abstainVotes) > 0 || 
+                     result.totalVoters > 0)) {
+        blockchainDataCache.set(cacheKey, result);
+      }
+      
+      return result;
+    } catch (error) {
+      console.error(`Error in getProposalVoteTotals for proposal ${proposalId}:`, error);
+      return null;
+    }
   }, [contextGetVoteTotals]);
   
   // Cast a vote using blockchain and handle state changes
@@ -187,6 +266,12 @@ export function useVoting() {
       const receipt = await tx.wait();
       console.log("Vote transaction confirmed:", receipt.transactionHash);
       
+      // Clear cache entries related to this proposal and user's votes
+      blockchainDataCache.delete(`hasVoted-${account}-${proposalId}`);
+      blockchainDataCache.delete(`voteDetails-${account}-${proposalId}`);
+      blockchainDataCache.delete(`voteTotals-${proposalId}`);
+      blockchainDataCache.delete(`dashboard-votes-${proposalId}`);
+      
       // Refresh blockchain data to update state
       refreshData();
       
@@ -226,6 +311,13 @@ export function useVoting() {
   // Get vote data using event indexing (backup method)
   const getIndexedVoteData = useCallback(async (proposalId) => {
     try {
+      // Try to get from cache first
+      const cacheKey = `indexedVotes-${proposalId}`;
+      const cachedData = blockchainDataCache.get(cacheKey);
+      if (cachedData !== null) {
+        return cachedData;
+      }
+      
       // Get all VoteCast events for this proposal
       const filter = contracts.governance.filters.VoteCast(proposalId);
       const events = await contracts.governance.queryFilter(filter);
@@ -260,7 +352,7 @@ export function useVoting() {
       const totalVotes = votesByType[0] + votesByType[1] + votesByType[2];
       const totalVotingPower = votingPowerByType[0] + votingPowerByType[1] + votingPowerByType[2];
       
-      return {
+      const result = {
         // Vote counts (1 per person)
         yesVotes: votesByType[1],
         noVotes: votesByType[0],
@@ -284,6 +376,11 @@ export function useVoting() {
         // Flag for source of data
         fromEvents: true
       };
+      
+      // Cache the result
+      blockchainDataCache.set(cacheKey, result);
+      
+      return result;
     } catch (error) {
       console.error("Error indexing vote data:", error);
       return null;
