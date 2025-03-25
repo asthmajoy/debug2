@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Clock, ArrowRight } from 'lucide-react';
+import { Clock, ArrowRight, RefreshCw } from 'lucide-react';
 import { formatPercentage, formatCountdown } from '../utils/formatters';
 import Loader from './Loader';
 import blockchainDataCache from '../utils/blockchainDataCache';
 
-const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }) => {
-  // Format numbers for display
+const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals, onRefresh }) => {
+  // Format numbers for display with better null/undefined handling
   const formatNumberDisplay = (value) => {
     if (value === undefined || value === null) return "0";
     
@@ -43,6 +43,7 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
 
   // Store proposal vote data
   const [proposalVoteData, setProposalVoteData] = useState({});
+  const [isRefreshing, setIsRefreshing] = useState(false);
   
   // Fetch vote data for active proposals
   useEffect(() => {
@@ -143,10 +144,36 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
       clearInterval(pollInterval);
     };
   }, [proposals, getProposalVoteTotals]);
+
+  // Handle manual refresh
+  const handleRefresh = async () => {
+    if (isRefreshing || !onRefresh) return;
+    
+    setIsRefreshing(true);
+    try {
+      await onRefresh();
+    } catch (error) {
+      console.error("Error refreshing dashboard data:", error);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
   
   return (
     <div>
-      <h2 className="text-xl font-semibold mb-4">Dashboard</h2>
+      <div className="flex justify-between items-center mb-4">
+        <h2 className="text-xl font-semibold">Dashboard</h2>
+        
+        {/* Add refresh button */}
+        <button 
+          onClick={handleRefresh}
+          disabled={isRefreshing || loading}
+          className="flex items-center text-sm text-gray-600 hover:text-indigo-600 disabled:text-gray-400"
+        >
+          <RefreshCw className={`h-4 w-4 mr-1 ${isRefreshing ? 'animate-spin' : ''}`} />
+          {isRefreshing ? 'Refreshing...' : 'Refresh Data'}
+        </button>
+      </div>
       
       {/* Governance Stats */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
@@ -159,10 +186,12 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
               <div>
                 <p className="text-gray-500">Token Holders</p>
                 <p className="text-2xl font-bold">{formatNumberDisplay(stats.totalHolders)}</p>
+                {stats.totalHolders === 0 && <p className="text-xs text-orange-500">No holders detected</p>}
               </div>
               <div>
                 <p className="text-gray-500">Circulating</p>
                 <p className="text-2xl font-bold">{formatNumberDisplay(stats.circulatingSupply)}</p>
+                {stats.circulatingSupply === "0" && <p className="text-xs text-orange-500">No tokens in circulation</p>}
               </div>
               <div>
                 <p className="text-gray-500">Active Proposals</p>
@@ -233,6 +262,15 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
         </div>
       </div>
       
+      {/* Error Message (if any) */}
+      {stats.errorMessage && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-6">
+          <p className="font-medium">Error loading dashboard data:</p>
+          <p className="text-sm">{stats.errorMessage}</p>
+          <p className="text-sm mt-2">Try refreshing the page or check your network connection.</p>
+        </div>
+      )}
+      
       {/* Active Proposals */}
       <div className="bg-white p-6 rounded-lg shadow">
         <div className="flex justify-between mb-4">
@@ -244,109 +282,113 @@ const DashboardTab = ({ user, stats, loading, proposals, getProposalVoteTotals }
             View All
           </button>
         </div>
-        <div className="space-y-4">
-          {proposals && proposals.length > 0 ? (
-            proposals.map((proposal, idx) => {
-              // Get vote data from our state
-              const voteData = proposalVoteData[proposal.id] || {
-                yesVotes: parseFloat(proposal.yesVotes) || 0,
-                noVotes: parseFloat(proposal.noVotes) || 0,
-                abstainVotes: parseFloat(proposal.abstainVotes) || 0,
-                yesVotingPower: parseFloat(proposal.yesVotes) || 0,
-                noVotingPower: parseFloat(proposal.noVotes) || 0,
-                abstainVotingPower: parseFloat(proposal.abstainVotes) || 0,
-                totalVoters: 0,
-                yesPercentage: 0,
-                noPercentage: 0,
-                abstainPercentage: 0
-              };
+        {loading ? (
+          <Loader size="small" text="Loading proposals..." />
+        ) : (
+          <div className="space-y-4">
+            {proposals && proposals.length > 0 ? (
+              proposals.map((proposal, idx) => {
+                // Get vote data from our state
+                const voteData = proposalVoteData[proposal.id] || {
+                  yesVotes: parseFloat(proposal.yesVotes) || 0,
+                  noVotes: parseFloat(proposal.noVotes) || 0,
+                  abstainVotes: parseFloat(proposal.abstainVotes) || 0,
+                  yesVotingPower: parseFloat(proposal.yesVotes) || 0,
+                  noVotingPower: parseFloat(proposal.noVotes) || 0,
+                  abstainVotingPower: parseFloat(proposal.abstainVotes) || 0,
+                  totalVoters: 0,
+                  yesPercentage: 0,
+                  noPercentage: 0,
+                  abstainPercentage: 0
+                };
 
-              // Ensure we have all required properties with correct types
-              const processedVoteData = {
-                // Original values from blockchain
-                yesVotingPower: parseFloat(voteData.yesVotingPower || voteData.yesVotes || 0),
-                noVotingPower: parseFloat(voteData.noVotingPower || voteData.noVotes || 0),
-                abstainVotingPower: parseFloat(voteData.abstainVotingPower || voteData.abstainVotes || 0),
-                totalVoters: voteData.totalVoters || 0,
-                
-                // Use existing percentages if available, otherwise calculate
-                yesPercentage: voteData.yesPercentage || 0,
-                noPercentage: voteData.noPercentage || 0,
-                abstainPercentage: voteData.abstainPercentage || 0
-              };
+                // Ensure we have all required properties with correct types
+                const processedVoteData = {
+                  // Original values from blockchain
+                  yesVotingPower: parseFloat(voteData.yesVotingPower || voteData.yesVotes || 0),
+                  noVotingPower: parseFloat(voteData.noVotingPower || voteData.noVotes || 0),
+                  abstainVotingPower: parseFloat(voteData.abstainVotingPower || voteData.abstainVotes || 0),
+                  totalVoters: voteData.totalVoters || 0,
+                  
+                  // Use existing percentages if available, otherwise calculate
+                  yesPercentage: voteData.yesPercentage || 0,
+                  noPercentage: voteData.noPercentage || 0,
+                  abstainPercentage: voteData.abstainPercentage || 0
+                };
 
-              // Calculate total voting power
-              const totalVotingPower = processedVoteData.yesVotingPower + 
-                                       processedVoteData.noVotingPower + 
-                                       processedVoteData.abstainVotingPower;
+                // Calculate total voting power
+                const totalVotingPower = processedVoteData.yesVotingPower + 
+                                        processedVoteData.noVotingPower + 
+                                        processedVoteData.abstainVotingPower;
 
-              // If percentages aren't provided, calculate them based on voting power
-              if (!voteData.yesPercentage && !voteData.noPercentage && !voteData.abstainPercentage) {
-                if (totalVotingPower > 0) {
-                  processedVoteData.yesPercentage = (processedVoteData.yesVotingPower / totalVotingPower) * 100;
-                  processedVoteData.noPercentage = (processedVoteData.noVotingPower / totalVotingPower) * 100;
-                  processedVoteData.abstainPercentage = (processedVoteData.abstainVotingPower / totalVotingPower) * 100;
+                // If percentages aren't provided, calculate them based on voting power
+                if (!voteData.yesPercentage && !voteData.noPercentage && !voteData.abstainPercentage) {
+                  if (totalVotingPower > 0) {
+                    processedVoteData.yesPercentage = (processedVoteData.yesVotingPower / totalVotingPower) * 100;
+                    processedVoteData.noPercentage = (processedVoteData.noVotingPower / totalVotingPower) * 100;
+                    processedVoteData.abstainPercentage = (processedVoteData.abstainVotingPower / totalVotingPower) * 100;
+                  }
                 }
-              }
-              
-              return (
-                <div key={idx} className="p-4 border border-gray-200 rounded-lg">
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <p className="font-medium">{proposal.title}</p>
-                      <p className="text-xs text-gray-500">Proposal #{proposal.id}</p>
+                
+                return (
+                  <div key={idx} className="p-4 border border-gray-200 rounded-lg">
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <p className="font-medium">{proposal.title || `Proposal #${proposal.id}`}</p>
+                        <p className="text-xs text-gray-500">Proposal #{proposal.id}</p>
+                      </div>
+                      <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-1 rounded-full flex items-center">
+                        <Clock className="w-3 h-3 mr-1" />
+                        {formatCountdown(proposal.deadline)}
+                      </span>
                     </div>
-                    <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-1 rounded-full flex items-center">
-                      <Clock className="w-3 h-3 mr-1" />
-                      {formatCountdown(proposal.deadline)}
-                    </span>
-                  </div>
-                  
-                  {/* Vote percentages */}
-                  <div className="flex justify-between text-sm mb-2">
-                    <span>Yes: {processedVoteData.yesPercentage.toFixed(1)}%</span>
-                    <span>No: {processedVoteData.noPercentage.toFixed(1)}%</span>
-                    <span>Abstain: {processedVoteData.abstainPercentage.toFixed(1)}%</span>
-                  </div>
-                  
-                  {/* Vote bar */}
-                  <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-                    <div className="flex h-full">
-                      <div 
-                        className="bg-green-500 h-full" 
-                        style={{ width: `${processedVoteData.yesPercentage}%` }}
-                      ></div>
-                      <div 
-                        className="bg-red-500 h-full" 
-                        style={{ width: `${processedVoteData.noPercentage}%` }}
-                      ></div>
-                      <div 
-                        className="bg-gray-400 h-full" 
-                        style={{ width: `${processedVoteData.abstainPercentage}%` }}
-                      ></div>
+                    
+                    {/* Vote percentages */}
+                    <div className="flex justify-between text-sm mb-2">
+                      <span>Yes: {processedVoteData.yesPercentage.toFixed(1)}%</span>
+                      <span>No: {processedVoteData.noPercentage.toFixed(1)}%</span>
+                      <span>Abstain: {processedVoteData.abstainPercentage.toFixed(1)}%</span>
+                    </div>
+                    
+                    {/* Vote bar */}
+                    <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div className="flex h-full">
+                        <div 
+                          className="bg-green-500 h-full" 
+                          style={{ width: `${processedVoteData.yesPercentage}%` }}
+                        ></div>
+                        <div 
+                          className="bg-red-500 h-full" 
+                          style={{ width: `${processedVoteData.noPercentage}%` }}
+                        ></div>
+                        <div 
+                          className="bg-gray-400 h-full" 
+                          style={{ width: `${processedVoteData.abstainPercentage}%` }}
+                        ></div>
+                      </div>
+                    </div>
+                    
+                    {/* Voting power display */}
+                    <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mt-2">
+                      <div>{formatToFiveDecimals(processedVoteData.yesVotingPower)} JST</div>
+                      <div className="text-center">{formatToFiveDecimals(processedVoteData.noVotingPower)} JST</div>
+                      <div className="text-right">{formatToFiveDecimals(processedVoteData.abstainVotingPower)} JST</div>
+                    </div>
+                    
+                    {/* Total voters count */}
+                    <div className="text-xs text-gray-500 mt-1 text-right">
+                      Total voters: {processedVoteData.totalVoters || 0}
                     </div>
                   </div>
-                  
-                  {/* Voting power display */}
-                  <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mt-2">
-                    <div>{formatToFiveDecimals(processedVoteData.yesVotingPower)} JST</div>
-                    <div className="text-center">{formatToFiveDecimals(processedVoteData.noVotingPower)} JST</div>
-                    <div className="text-right">{formatToFiveDecimals(processedVoteData.abstainVotingPower)} JST</div>
-                  </div>
-                  
-                  {/* Total voters count */}
-                  <div className="text-xs text-gray-500 mt-1 text-right">
-                    Total voters: {processedVoteData.totalVoters || 0}
-                  </div>
-                </div>
-              );
-            })
-          ) : (
-            <div className="text-center py-6 text-gray-500">
-              No active proposals at the moment
-            </div>
-          )}
-        </div>
+                );
+              })
+            ) : (
+              <div className="text-center py-6 text-gray-500">
+                No active proposals at the moment
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

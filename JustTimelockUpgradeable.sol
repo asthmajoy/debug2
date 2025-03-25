@@ -410,52 +410,19 @@ contract JustTimelockUpgradeable is
      * @return True if authorized by token holdings, false otherwise
      */
     function isAuthorizedByTokens(address user) public view returns (bool) {
-    // First check if the token contract is set
-    if (address(justToken) == address(0)) {
-        return false;
+        // First check if the token contract is set
+        if (address(justToken) == address(0)) {
+            return false;
+        }
+        
+        // Then safely check the balance
+        try justToken.balanceOf(user) returns (uint256 balance) {
+            return balance >= minExecutorTokenThreshold;
+        } catch {
+            // If the call fails, return false
+            return false;
+        }
     }
-    
-    // Then safely check the balance
-    try justToken.balanceOf(user) returns (uint256 balance) {
-        return balance >= minExecutorTokenThreshold;
-    } catch {
-        // If the call fails, return false
-        return false;
-    }
-}
-
-    /**
-     * @notice Queue a transaction using the appropriate threat level delay
-     * @param target Target address
-     * @param value ETH value
-     * @param data Call data
-     * @return txHash The hash of the transaction
-     */
-     
-function queueTransactionWithThreatLevel(
-    address target,
-    uint256 value,
-    bytes memory data
-) public whenNotPaused returns (bytes32) {
-    // Check if user is authorized either by token holdings OR by having the PROPOSER_ROLE
-    bool isAuthorizedByTokens = this.isAuthorizedByTokens(msg.sender);
-    bool isAuthorizedByRole = hasRole(PROPOSER_ROLE, msg.sender);
-    
-    // User must have either sufficient tokens OR the PROPOSER_ROLE
-    if (!isAuthorizedByTokens && !isAuthorizedByRole) {
-        // For debugging - uncomment these lines:
-        // revert("Not authorized. Token auth: " + 
-        //      (isAuthorizedByTokens ? "true" : "false") + 
-        //      ", Role auth: " + 
-        //      (isAuthorizedByRole ? "true" : "false"));
-        revert NotAuthorized(msg.sender, PROPOSER_ROLE);
-    }
-    
-    ThreatLevel level = getThreatLevel(target, data);
-    uint256 delay = getDelayForThreatLevel(level);
-    return _queueTransaction(target, value, data, delay, level);
-}
-
 
     /**
      * @notice Queue a transaction with a custom delay
@@ -475,9 +442,8 @@ function queueTransactionWithThreatLevel(
         if (delay < minDelay) revert DelayTooShort(delay, minDelay);
         if (delay > maxDelay) revert DelayTooLong(delay, maxDelay);
         
-        // Custom delay can only be set by users with PROPOSER_ROLE
-        // Token holders without this role cannot use custom delays
-        if (!hasRole(PROPOSER_ROLE, msg.sender))
+        // Custom delay can only be set by users with PROPOSER_ROLE or GOVERNANCE_ROLE
+        if (!hasRole(PROPOSER_ROLE, msg.sender) && !hasRole(GOVERNANCE_ROLE, msg.sender))
             revert NotAuthorized(msg.sender, PROPOSER_ROLE);
         
         // Determine threat level but use the custom delay
@@ -725,7 +691,8 @@ function executeFailedTransaction(bytes32 txHash)
     // Check for role-based authorization only (no token authorization)
     if (!hasRole(GUARDIAN_ROLE, msg.sender) && 
         !hasRole(CANCELLER_ROLE, msg.sender) &&
-        !hasRole(PROPOSER_ROLE, msg.sender)) {
+        !hasRole(PROPOSER_ROLE, msg.sender) && 
+        !hasRole(GOVERNANCE_ROLE, msg.sender)) {
         revert NotAuthorized(msg.sender, bytes32(0));
     }
     
@@ -898,7 +865,7 @@ function executeFailedTransaction(bytes32 txHash)
         
         // System parameter updates can only be queued by users with PROPOSER_ROLE
         // Token holders without this role cannot update system parameters
-        if (!hasRole(PROPOSER_ROLE, msg.sender))
+        if (!hasRole(PROPOSER_ROLE, msg.sender) && !hasRole(GOVERNANCE_ROLE, msg.sender))
             revert NotAuthorized(msg.sender, PROPOSER_ROLE);
         
         // Prepare call data for updateDelays
@@ -909,12 +876,10 @@ function executeFailedTransaction(bytes32 txHash)
             newGracePeriod
         );
         
-        // Queue the transaction using the appropriate threat level
-        return queueTransactionWithThreatLevel(
-            address(this),
-            0, // No ETH value
-            data
-        );
+        // Queue the transaction with an appropriate delay based on threat level
+        ThreatLevel level = getThreatLevel(address(this), data);
+        uint256 delay = getDelayForThreatLevel(level);
+        return _queueTransaction(address(this), 0, data, delay, level);
     }
     
     /**
@@ -939,7 +904,7 @@ function executeFailedTransaction(bytes32 txHash)
         
         // System parameter updates can only be queued by users with PROPOSER_ROLE
         // Token holders without this role cannot update system parameters
-        if (!hasRole(PROPOSER_ROLE, msg.sender))
+        if (!hasRole(PROPOSER_ROLE, msg.sender) && !hasRole(GOVERNANCE_ROLE, msg.sender))
             revert NotAuthorized(msg.sender, PROPOSER_ROLE);
         
         // Prepare call data
@@ -951,12 +916,10 @@ function executeFailedTransaction(bytes32 txHash)
             newCriticalDelay
         );
         
-        // Queue the transaction using the appropriate threat level
-        return queueTransactionWithThreatLevel(
-            address(this),
-            0, // No ETH value
-            data
-        );
+        // Queue the transaction with an appropriate delay based on threat level
+        ThreatLevel level = getThreatLevel(address(this), data);
+        uint256 delay = getDelayForThreatLevel(level);
+        return _queueTransaction(address(this), 0, data, delay, level);
     }
 
     /**

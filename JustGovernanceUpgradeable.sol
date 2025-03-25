@@ -31,14 +31,18 @@ interface JustTokenUpgradeable {
  * @notice Interface for the JustTimelock contract
  */
 interface JustTimelockUpgradeable {
+    enum ThreatLevel { LOW, MEDIUM, HIGH, CRITICAL }
+    
     function queueTransaction(address target, uint256 value, bytes calldata data, uint256 delay) external returns (bytes32 txHash);
     function executeTransaction(bytes32 txHash) external returns (bytes memory);
-    function executeExpiredTransaction(bytes32 txHash) external returns (bytes memory); // New function
+    function executeExpiredTransaction(bytes32 txHash) external returns (bytes memory);
     function cancelTransaction(bytes32 txHash) external;
     function queuedTransactions(bytes32 txHash) external view returns (bool);
     function getTransaction(bytes32 txHash) external view returns (address target, uint256 value, bytes memory data, uint256 eta, bool executed);
     function gracePeriod() external view returns (uint256);
     function minDelay() external view returns (uint256);
+    function getThreatLevel(address target, bytes memory data) external view returns (ThreatLevel);
+    function getDelayForThreatLevel(ThreatLevel level) external view returns (uint256);
 }
 
 /**
@@ -234,8 +238,6 @@ contract JustGovernanceUpgradeable is
     event RoleChange(bytes32 indexed role, address indexed account, bool isGranted);
     event ContractPaused(address indexed pauser);
     event ContractUnpaused(address indexed unpauser);
-    event ETHRescued(address indexed recipient, uint256 amount);
-    event ERC20Rescued(address indexed token, address indexed recipient, uint256 amount);
     event ContractInitialized(address indexed token, address indexed timelock, address indexed admin);
     event VoteCast(uint256 indexed proposalId, address indexed voter, uint8 support, uint256 votingPower);
     event TimelockTransactionSubmitted(uint256 indexed proposalId, bytes32 indexed txHash);
@@ -365,52 +367,6 @@ contract JustGovernanceUpgradeable is
         emit ContractUnpaused(msg.sender);
     }
 
-    /**
-     * @notice Rescue ETH trapped in the contract
-     * @dev Can only be called by admin
-     */
-    function rescueETH() external onlyRole(ADMIN_ROLE) nonReentrant {
-        uint256 balance = address(this).balance;
-        if (balance == 0) revert InvalidAmount();
-        
-        // Set a gas limit for the transfer to prevent potential reentrancy
-        (bool success, ) = payable(msg.sender).call{value: balance, gas: 30000}("");
-        if (!success) revert TransferFailed();
-        
-        emit ETHRescued(msg.sender, balance);
-        
-        emit ProposalEvent(
-            0, // No specific proposal ID
-            5, // Using stake event type for simplicity
-            msg.sender,
-            abi.encode("ETH_RESCUED", balance)
-        );
-    }
-
-    /**
-     * @notice Rescue ERC20 tokens trapped in the contract
-     * @dev Can only be called by admin
-     * @param tokenAddress The address of the token to rescue
-     */
-    function rescueERC20(address tokenAddress) external onlyRole(ADMIN_ROLE) nonReentrant {
-        if (tokenAddress == address(0)) revert ZeroAddress();
-        IERC20Upgradeable token = IERC20Upgradeable(tokenAddress);
-        
-        uint256 balance = token.balanceOf(address(this));
-        if (balance == 0) revert InvalidAmount();
-        
-        token.safeTransfer(msg.sender, balance);
-        
-        emit ERC20Rescued(tokenAddress, msg.sender, balance);
-        
-        emit ProposalEvent(
-            0, // No specific proposal ID
-            5, // Using stake event type for simplicity
-            msg.sender,
-            abi.encode("ERC20_RESCUED", tokenAddress, balance)
-        );
-    }
-    
     /**
      * @notice Revokes a role from an account with safety checks
      * @dev Callable by admin or timelock contract
@@ -822,12 +778,11 @@ function getProposalVotes(uint256 proposalId) external view returns (
     return (yesVotes, noVotes, abstainVotes, totalVotingPower, totalVoters);
 }
     
-    /**
-     * @notice Queue a successful proposal for execution
-     * @param proposalId The ID of the proposal to queue
-     */
-
-    function queueProposal(uint256 proposalId) external
+/**
+ * @notice Queue a successful proposal for execution using threat level
+ * @param proposalId The ID of the proposal to queue
+ */
+function queueProposal(uint256 proposalId) external
     whenNotPaused
     validActiveProposal(proposalId)
     nonReentrant
@@ -836,18 +791,40 @@ function getProposalVotes(uint256 proposalId) external view returns (
     
     ProposalData storage proposal = _proposals[proposalId];
     
-    // The critical line: we encode a call to *this* contract's executeProposalLogic(uint256)
+    // Encode a call to this contract's executeProposalLogic function
     bytes memory data = abi.encodeWithSelector(
         this.executeProposalLogic.selector,
         proposalId
     );
     
-    // Then the timelock is instructed to call address(this) with that data.
+    // Get the threat level for this proposal's action
+    JustTimelockUpgradeable.ThreatLevel threatLevel;
+    uint256 delay;
+    
+    // Determine threat level based on proposal type
+    if (proposal.pType == ProposalType.General) {
+        // For general proposals, check the target and function selector
+        threatLevel = timelock.getThreatLevel(proposal.target, proposal.callData);
+    } else if (proposal.pType == ProposalType.GovernanceChange) {
+        // Governance changes are typically medium to high threat
+        threatLevel = JustTimelockUpgradeable.ThreatLevel.MEDIUM;
+    } else if (proposal.pType == ProposalType.TokenMint || proposal.pType == ProposalType.TokenBurn) {
+        // Token minting and burning are high threat
+        threatLevel = JustTimelockUpgradeable.ThreatLevel.HIGH;
+    } else {
+        // Default to LOW for other transactions
+        threatLevel = JustTimelockUpgradeable.ThreatLevel.LOW;
+    }
+    
+    // Get the delay based on threat level
+    delay = timelock.getDelayForThreatLevel(threatLevel);
+    
+    // Queue the transaction in the timelock with the appropriate delay
     bytes32 txHash = timelock.queueTransaction(
         address(this),
         0, // No ETH
         data,
-        govParams.timelockDelay
+        delay
     );
     
     proposal.timelockTxHash = txHash;
@@ -1112,11 +1089,6 @@ function executeProposalLogic(uint256 proposalId) external {
         return (forVotes, againstVotes, abstainVotes, totalVotingPower, voterCount);
     }
 
-    /**
-     * @notice Simplified function for receiving ETH
-     */
-    receive() external payable {}
-    
     /**
      * @dev This empty reserved space is put in place to allow future versions to add new
      * variables without shifting down storage in the inheritance chain.

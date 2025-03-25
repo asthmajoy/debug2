@@ -896,41 +896,81 @@ export function useProposals() {
       setLoading(false);
     }
   };
-  const executeProposal = async (proposalId) => {
-    if (!isConnected || !contractsReady) throw new Error("Not connected");
-    if (!contracts.governance) throw new Error("Governance contract not initialized");
-    
-    try {
-      setLoading(true);
-      setError(null);
-      
-      // Verify proposal state before executing
-      const state = await contracts.governance.getProposalState(proposalId);
-      if (state !== PROPOSAL_STATES.QUEUED) {
-        throw new Error("Only queued proposals can be executed");
-      }
-      
-      const tx = await contracts.governance.executeProposal(proposalId, {
-        gasLimit: 1000000 // Higher gas limit for execution due to complexity
-      });
-      
-      await tx.wait();
-      console.log(`Proposal ${proposalId} executed successfully`);
-      
-      // Refresh proposals list
-      await fetchProposals();
-      
-      return true;
-    } catch (err) {
-      console.error("Error executing proposal:", err);
-      const errorMessage = extractErrorMessage(err);
-      setError(errorMessage);
-      throw new Error(errorMessage);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Add these changes to useProposals.js
 
+// Make sure the functions in your hook match the contract's functions
+const queueProposal = async (proposalId) => {
+  if (!isConnected || !contractsReady) throw new Error("Not connected");
+  if (!contracts.governance) throw new Error("Governance contract not initialized");
+  
+  try {
+    setLoading(true);
+    setError(null);
+    
+    console.log(`Calling governance.queueProposal for proposal ${proposalId}`);
+    
+    // Call the governance contract's queueProposal function directly
+    const tx = await contracts.governance.queueProposal(proposalId, {
+      gasLimit: ethers.utils.parseUnits("1000000", "wei"), // 1M gas limit
+      gasPrice: (await contracts.governance.provider.getGasPrice()).mul(110).div(100) // 10% higher
+    });
+    
+    console.log("Transaction sent:", tx.hash);
+    
+    const receipt = await tx.wait();
+    console.log("Transaction confirmed:", receipt);
+    
+    // After transaction is confirmed, refresh the proposal list
+    await fetchProposals();
+    
+    return { success: true, hash: tx.hash };
+  } catch (err) {
+    console.error("Error queueing proposal:", err);
+    
+    const errorMessage = extractErrorMessage(err);
+    setError(errorMessage);
+    throw new Error(errorMessage);
+  } finally {
+    setLoading(false);
+  }
+};
+
+// Similar update for executeProposal function
+const executeProposal = async (proposalId) => {
+  if (!isConnected || !contractsReady) throw new Error("Not connected");
+  if (!contracts.governance) throw new Error("Governance contract not initialized");
+  
+  try {
+    setLoading(true);
+    setError(null);
+    
+    console.log(`Calling governance.executeProposal for proposal ${proposalId}`);
+    
+    // Call the governance contract's executeProposal function directly
+    const tx = await contracts.governance.executeProposal(proposalId, {
+      gasLimit: ethers.utils.parseUnits("2000000", "wei"), // 2M gas for execution
+      gasPrice: (await contracts.governance.provider.getGasPrice()).mul(110).div(100) // 10% higher
+    });
+    
+    console.log("Execute transaction sent:", tx.hash);
+    
+    const receipt = await tx.wait();
+    console.log("Execute transaction confirmed:", receipt);
+    
+    // After transaction is confirmed, refresh the proposal list
+    await fetchProposals();
+    
+    return { success: true, hash: tx.hash };
+  } catch (err) {
+    console.error("Error executing proposal:", err);
+    
+    const errorMessage = extractErrorMessage(err);
+    setError(errorMessage);
+    throw new Error(errorMessage);
+  } finally {
+    setLoading(false);
+  }
+};
   const claimRefund = async (proposalId) => {
     if (!isConnected || !contractsReady) throw new Error("Not connected");
     if (!contracts.governance) throw new Error("Governance contract not initialized");

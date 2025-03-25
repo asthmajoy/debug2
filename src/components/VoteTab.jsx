@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ethers } from 'ethers';
 
-import { Clock, Check, X, X as XIcon, Calendar, Users, BarChart2 } from 'lucide-react';
+import { Clock, Check, X, X as XIcon, Calendar, Users, BarChart2, Settings, Info, HelpCircle } from 'lucide-react';
 import { PROPOSAL_STATES, VOTE_TYPES } from '../utils/constants';
 import { formatCountdown } from '../utils/formatters';
 import Loader from './Loader';
@@ -15,6 +15,18 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
   const [showModal, setShowModal] = useState(false);
   const [quorum, setQuorum] = useState(null);
   const [proposalVoteData, setProposalVoteData] = useState({});
+  const [govParams, setGovParams] = useState({
+    votingDuration: 0,
+    quorum: 0,
+    timelockDelay: 0,
+    proposalCreationThreshold: 0,
+    proposalStake: 0,
+    defeatedRefundPercentage: 0,
+    canceledRefundPercentage: 0,
+    expiredRefundPercentage: 0,
+    loading: true
+  });
+  // Removed showGovParams state since we're showing all parameters by default
   
   // Track locally which proposals the user has voted on and how
   const [votedProposals, setVotedProposals] = useState({});
@@ -56,22 +68,22 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     
     const cacheKey = getVoteDataCacheKey(proposalId);
     
-    // For inactive proposals, prioritize cached data
-    if (isInactiveProposal(proposal) && !forceRefresh) {
+    // Try to get from cache first, unless force refresh is requested
+    if (!forceRefresh) {
       const cachedData = blockchainDataCache.get(cacheKey);
       if (cachedData) {
-        console.log(`Using cached data for inactive proposal #${proposalId}`);
+        console.log(`Using cached data for proposal #${proposalId}`);
         return cachedData;
       }
     }
     
-    // For active proposals or if we need to refresh, clear the cache
-    if (forceRefresh || !isInactiveProposal(proposal)) {
+    // If force refresh is requested, clear the cache
+    if (forceRefresh) {
       blockchainDataCache.delete(cacheKey);
     }
     
     try {
-      // Get fresh data from the blockchain
+      // Get fresh data from the blockchain - works for both active and inactive proposals
       console.log(`Fetching vote data for proposal #${proposalId}${isInactiveProposal(proposal) ? ' (inactive)' : ''}`);
       const data = await getProposalVoteTotals(proposalId);
       
@@ -108,8 +120,8 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
         processedData.abstainPercentage = 0;
       }
       
-      // Set a TTL based on proposal state - longer for inactive
-      const ttlSeconds = isInactiveProposal(proposal) ? 86400 : 15; // 24 hours for inactive, 15 sec for active
+      // Set a longer TTL for all proposals to ensure data persists
+      const ttlSeconds = 86400 * 7; // 7 days for all proposals
       
       // Cache the result with appropriate TTL
       blockchainDataCache.set(cacheKey, processedData, ttlSeconds);
@@ -118,9 +130,9 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     } catch (error) {
       console.error(`Error fetching vote data for proposal ${proposalId}:`, error);
       
-      // For inactive proposals, if we can't fetch new data, try to construct data from the proposal itself
-      if (isInactiveProposal(proposal)) {
-        console.log(`Constructing fallback data for inactive proposal #${proposalId}`);
+      // Try to use proposal data directly if blockchain query failed
+      try {
+        console.log(`Constructing data from proposal object for #${proposalId}`);
         const fallbackData = {
           yesVotes: proposal.votedYes ? 1 : 0,
           noVotes: proposal.votedNo ? 1 : 0,
@@ -149,13 +161,29 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
           fallbackData.abstainPercentage = 0;
         }
         
-        // Cache this fallback data with a long TTL
-        blockchainDataCache.set(cacheKey, fallbackData, 86400); // 24 hours
+        // Cache this fallback data with a medium TTL
+        blockchainDataCache.set(cacheKey, fallbackData, 86400 * 7); // 7 days
         
         return fallbackData;
+      } catch (fallbackErr) {
+        console.error("Error creating fallback data:", fallbackErr);
+        
+        // Return empty data structure as last resort
+        return {
+          yesVotes: 0,
+          noVotes: 0,
+          abstainVotes: 0,
+          yesVotingPower: 0,
+          noVotingPower: 0,
+          abstainVotingPower: 0,
+          totalVoters: 0,
+          totalVotingPower: 0,
+          yesPercentage: 0,
+          noPercentage: 0,
+          abstainPercentage: 0,
+          fetchedAt: Date.now()
+        };
       }
-      
-      return null;
     }
   };
 
@@ -166,7 +194,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     
     if (cachedData) {
       // If we already have data in the cache, update it with a long TTL
-      blockchainDataCache.set(cacheKey, cachedData, 86400); // 24 hours
+      blockchainDataCache.set(cacheKey, cachedData, 86400 * 30); // 30 days
       console.log(`Archived vote data for proposal #${proposalId}`);
     } else {
       // Try to get fresh data one last time and archive it
@@ -197,7 +225,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
             processedData.abstainPercentage = (processedData.abstainVotingPower / processedData.totalVotingPower) * 100;
           }
           
-          blockchainDataCache.set(cacheKey, processedData, 86400); // 24 hours
+          blockchainDataCache.set(cacheKey, processedData, 86400 * 30); // 30 days
           console.log(`Archived fresh vote data for proposal #${proposalId}`);
         }
       } catch (error) {
@@ -240,6 +268,21 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     
     // Return with exactly 5 decimal places
     return numValue.toFixed(5);
+  };
+  
+  // Format date correctly
+  const formatDate = (timestamp) => {
+    if (!timestamp) return "Unknown";
+    
+    // Convert seconds to milliseconds if needed
+    const dateValue = timestamp > 10000000000 ? timestamp : timestamp * 1000;
+    
+    try {
+      return new Date(dateValue).toLocaleDateString();
+    } catch (error) {
+      console.error("Error formatting date:", error);
+      return "Invalid Date";
+    }
   };
   
   // Fetch vote data for all proposals - USING IMPROVED CACHING FOR INACTIVE PROPOSALS
@@ -454,27 +497,207 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     
   }, [proposals, isInactiveProposal, VOTE_TYPES]);
   
-  // Fetch quorum from governance contract - SIMPLIFIED
+  // Fetch all governance parameters including quorum
   useEffect(() => {
-    const fetchQuorum = async () => {
+    const fetchGovernanceParams = async () => {
       if (!governanceContract) return;
       
       try {
-        // Simple direct access to the quorum value in govParams
-        const params = await governanceContract.govParams();
+        setGovParams(prev => ({ ...prev, loading: true }));
+        console.log("Fetching governance parameters...");
         
-        if (params && params.quorum) {
-          // Convert BigNumber to regular number with proper parsing
-          const quorumValue = parseInt(params.quorum.toString());
-          setQuorum(quorumValue);
+        // Call govParams() function - this is the most reliable approach
+        let params;
+        try {
+          params = await governanceContract.govParams();
+          console.log("Raw governance params returned:", params);
+        } catch (err) {
+          console.error("Error calling governance.govParams():", err);
+          throw err; // Re-throw to handle in the outer catch
+        }
+        
+        if (params) {
+          // Initialize default values
+          const formattedParams = {
+            votingDuration: 0,
+            quorum: 0,
+            timelockDelay: 0,
+            proposalCreationThreshold: 0,
+            proposalStake: 0,
+            defeatedRefundPercentage: 0,
+            canceledRefundPercentage: 0,
+            expiredRefundPercentage: 0,
+            loading: false
+          };
+  
+          // Handle different response structures
+          if (typeof params === 'object') {
+            // Handle the case where params is returned as an array
+            if (Array.isArray(params)) {
+              console.log("Params returned as array with length:", params.length);
+              // Format each numeric value appropriately (token amounts vs regular numbers)
+              formattedParams.votingDuration = Number(params[0] || 0);
+              formattedParams.quorum = params[1] ? Number(ethers.utils.formatEther(params[1])) : 0;
+              formattedParams.timelockDelay = Number(params[2] || 0);
+              formattedParams.proposalCreationThreshold = params[3] ? Number(ethers.utils.formatEther(params[3])) : 0;
+              formattedParams.proposalStake = params[4] ? Number(ethers.utils.formatEther(params[4])) : 0;
+              formattedParams.defeatedRefundPercentage = Number(params[5] || 0);
+              formattedParams.canceledRefundPercentage = Number(params[6] || 0);
+              formattedParams.expiredRefundPercentage = Number(params[7] || 0);
+            } 
+            // Handle the case where params is returned as an object with named properties
+            else {
+              console.log("Params returned as object with keys:", Object.keys(params));
+              
+              // Extract each parameter and handle formatting appropriately
+              if (params.votingDuration !== undefined) {
+                formattedParams.votingDuration = Number(params.votingDuration);
+              }
+              
+              if (params.quorum !== undefined) {
+                try {
+                  // Handle BigNumber formatting
+                  if (typeof params.quorum.toNumber === 'function') {
+                    formattedParams.quorum = Number(ethers.utils.formatEther(params.quorum));
+                  } else {
+                    formattedParams.quorum = Number(params.quorum) / 1e18;
+                  }
+                } catch (e) {
+                  console.warn("Error formatting quorum:", e);
+                  formattedParams.quorum = Number(params.quorum) / 1e18;
+                }
+              }
+              
+              if (params.timelockDelay !== undefined) {
+                formattedParams.timelockDelay = Number(params.timelockDelay);
+              }
+              
+              if (params.proposalCreationThreshold !== undefined) {
+                try {
+                  if (typeof params.proposalCreationThreshold.toNumber === 'function') {
+                    formattedParams.proposalCreationThreshold = Number(ethers.utils.formatEther(params.proposalCreationThreshold));
+                  } else {
+                    formattedParams.proposalCreationThreshold = Number(params.proposalCreationThreshold) / 1e18;
+                  }
+                } catch (e) {
+                  console.warn("Error formatting proposalCreationThreshold:", e);
+                  formattedParams.proposalCreationThreshold = Number(params.proposalCreationThreshold) / 1e18;
+                }
+              }
+              
+              if (params.proposalStake !== undefined) {
+                try {
+                  if (typeof params.proposalStake.toNumber === 'function') {
+                    formattedParams.proposalStake = Number(ethers.utils.formatEther(params.proposalStake));
+                  } else {
+                    formattedParams.proposalStake = Number(params.proposalStake) / 1e18;
+                  }
+                } catch (e) {
+                  console.warn("Error formatting proposalStake:", e);
+                  formattedParams.proposalStake = Number(params.proposalStake) / 1e18;
+                }
+              }
+              
+              // For percentage values, no need to divide by 1e18
+              if (params.defeatedRefundPercentage !== undefined) {
+                formattedParams.defeatedRefundPercentage = Number(params.defeatedRefundPercentage);
+              }
+              
+              if (params.canceledRefundPercentage !== undefined) {
+                formattedParams.canceledRefundPercentage = Number(params.canceledRefundPercentage);
+              }
+              
+              if (params.expiredRefundPercentage !== undefined) {
+                formattedParams.expiredRefundPercentage = Number(params.expiredRefundPercentage);
+              }
+            }
+          } else if (typeof params === 'function') {
+            // Some contract interfaces might return a function for further calls
+            console.warn("Params is a function, not expected format");
+          } else {
+            console.warn("Unexpected params type:", typeof params);
+          }
+          
+          // Print formatted parameters for debugging
+          console.log("Formatted governance parameters:", formattedParams);
+          
+          // Update state with the formatted parameters
+          setGovParams(formattedParams);
+          
+          // Also set the quorum value for backward compatibility
+          setQuorum(formattedParams.quorum.toString());
+        } else {
+          console.error("Governance params call returned null or undefined");
+          throw new Error("Failed to get governance parameters");
         }
       } catch (error) {
-        console.error("Error fetching quorum:", error);
+        console.error("Error fetching governance parameters:", error);
+        
+        // Try different approach - direct properties if contract supports it
+        try {
+          console.log("Trying alternative approach with direct property access...");
+          
+          // Check if we can get access to individual properties
+          const hasDirectAccess = typeof governanceContract.quorum === 'function' || 
+                                typeof governanceContract.votingDuration === 'function';
+          
+          if (hasDirectAccess) {
+            // Call individual getters if they exist
+            const params = {
+              quorum: await (governanceContract.quorum ? governanceContract.quorum() : ethers.BigNumber.from("1000000000000000000000")), // Default 1000
+              votingDuration: await (governanceContract.votingDuration ? governanceContract.votingDuration() : 86400), // Default 1 day
+              timelockDelay: await (governanceContract.timelockDelay ? governanceContract.timelockDelay() : 3600), // Default 1 hour
+              proposalCreationThreshold: await (governanceContract.proposalCreationThreshold ? governanceContract.proposalCreationThreshold() : ethers.BigNumber.from("100000000000000000000")), // Default 100
+              proposalStake: await (governanceContract.proposalStake ? governanceContract.proposalStake() : ethers.BigNumber.from("10000000000000000000")), // Default 10
+              defeatedRefundPercentage: await (governanceContract.defeatedRefundPercentage ? governanceContract.defeatedRefundPercentage() : 50),
+              canceledRefundPercentage: await (governanceContract.canceledRefundPercentage ? governanceContract.canceledRefundPercentage() : 75),
+              expiredRefundPercentage: await (governanceContract.expiredRefundPercentage ? governanceContract.expiredRefundPercentage() : 25)
+            };
+            
+            const formattedParams = {
+              votingDuration: Number(params.votingDuration),
+              quorum: typeof params.quorum.toNumber === 'function' ? Number(ethers.utils.formatEther(params.quorum)) : Number(params.quorum) / 1e18,
+              timelockDelay: Number(params.timelockDelay),
+              proposalCreationThreshold: typeof params.proposalCreationThreshold.toNumber === 'function' ? Number(ethers.utils.formatEther(params.proposalCreationThreshold)) : Number(params.proposalCreationThreshold) / 1e18,
+              proposalStake: typeof params.proposalStake.toNumber === 'function' ? Number(ethers.utils.formatEther(params.proposalStake)) : Number(params.proposalStake) / 1e18,
+              defeatedRefundPercentage: Number(params.defeatedRefundPercentage),
+              canceledRefundPercentage: Number(params.canceledRefundPercentage),
+              expiredRefundPercentage: Number(params.expiredRefundPercentage),
+              loading: false
+            };
+            
+            console.log("Governance parameters from direct access:", formattedParams);
+            setGovParams(formattedParams);
+            setQuorum(formattedParams.quorum.toString());
+            return;
+          }
+        } catch (alternativeErr) {
+          console.error("Alternative approach also failed:", alternativeErr);
+        }
+        
+        // If all approaches fail, use fallback values
+        const fallbackParams = {
+          votingDuration: 86400, // 1 day
+          quorum: 1000,
+          timelockDelay: 3600, // 1 hour
+          proposalCreationThreshold: 100,
+          proposalStake: 10,
+          defeatedRefundPercentage: 50,
+          canceledRefundPercentage: 75,
+          expiredRefundPercentage: 25,
+          loading: false
+        };
+        
+        console.log("Using fallback governance parameters:", fallbackParams);
+        setGovParams(fallbackParams);
+        setQuorum(fallbackParams.quorum.toString());
+      } finally {
+        setGovParams(prev => ({ ...prev, loading: false }));
       }
     };
     
-    fetchQuorum();
-  }, [governanceContract]);
+    fetchGovernanceParams();
+  }, [governanceContract]); 
 
   // Filter proposals based on vote status
   const filteredProposals = proposals.filter(proposal => {
@@ -673,6 +896,48 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     if (voteType === VOTE_TYPES.ABSTAIN) return 'Abstain';
     return '';
   };
+  
+  // Helper to get proposal type label
+  const getProposalTypeLabel = (proposal) => {
+    // Check if proposal has a typeLabel property
+    if (proposal.typeLabel) {
+      return proposal.typeLabel;
+    }
+    
+    // Fallback to numeric type if available
+    if (proposal.type !== undefined) {
+      switch (parseInt(proposal.type)) {
+        case 0: return "General";
+        case 1: return "Withdrawal";
+        case 2: return "Token Transfer";
+        case 3: return "Governance Change";
+        case 4: return "External ERC20 Transfer";
+        case 5: return "Token Mint";
+        case 6: return "Token Burn";
+        default: return "General Proposal";
+      }
+    }
+    
+    return "General Proposal";
+  };
+  
+  // Helper to get proposal state label and color
+  const getProposalStateInfo = (proposal) => {
+    // Get actual state instead of relying on deadline
+    const state = proposal.state;
+    
+    const stateLabels = {
+      [PROPOSAL_STATES.ACTIVE]: { label: "Active", color: "bg-yellow-100 text-yellow-800" },
+      [PROPOSAL_STATES.CANCELED]: { label: "Canceled", color: "bg-gray-100 text-gray-800" },
+      [PROPOSAL_STATES.DEFEATED]: { label: "Defeated", color: "bg-red-100 text-red-800" },
+      [PROPOSAL_STATES.SUCCEEDED]: { label: "Succeeded", color: "bg-green-100 text-green-800" },
+      [PROPOSAL_STATES.QUEUED]: { label: "Queued", color: "bg-blue-100 text-blue-800" },
+      [PROPOSAL_STATES.EXECUTED]: { label: "Executed", color: "bg-green-100 text-green-800" },
+      [PROPOSAL_STATES.EXPIRED]: { label: "Expired", color: "bg-gray-100 text-gray-800" }
+    };
+    
+    return stateLabels[parseInt(state)] || { label: "Unknown", color: "bg-gray-100 text-gray-800" };
+  };
 
   // Get vote data for a proposal - EXACTLY MATCHING DASHBOARD APPROACH
   const getVoteData = useCallback((proposal) => {
@@ -784,45 +1049,76 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
     );
   }, [getVoteData]);
 
-  // Trigger a manual refresh of vote data
-  const refreshAllVoteData = async () => {
-    if (!getProposalVoteTotals || !proposals || proposals.length === 0) return;
+  // Helper to format time durations in a human-readable way
+  const formatTimeDuration = (seconds) => {
+    if (!seconds || isNaN(seconds)) return "0 minutes";
     
-    console.log("Manually refreshing all vote data");
-    setLoading(true);
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
     
-    try {
-      const updatedVoteData = {};
-      
-      for (const proposal of proposals) {
-        try {
-          // For inactive proposals, we don't need to force refresh since the data won't change
-          const forceRefresh = !isInactiveProposal(proposal);
-          const data = await getProposalVoteDataWithCaching(proposal.id, forceRefresh);
-          if (data) {
-            updatedVoteData[proposal.id] = data;
-          }
-        } catch (error) {
-          console.error(`Error refreshing vote data for proposal ${proposal.id}:`, error);
-        }
-      }
-      
-      setProposalVoteData(prev => ({
-        ...prev,
-        ...updatedVoteData
-      }));
-    } catch (error) {
-      console.error("Error in manual refresh:", error);
-    } finally {
-      setLoading(false);
+    if (days > 0) {
+      return `${days} day${days !== 1 ? 's' : ''} ${hours} hour${hours !== 1 ? 's' : ''}`;
+    } else if (hours > 0) {
+      return `${hours} hour${hours !== 1 ? 's' : ''} ${minutes} minute${minutes !== 1 ? 's' : ''}`;
+    } else {
+      return `${minutes} minute${minutes !== 1 ? 's' : ''}`;
     }
   };
 
   return (
     <div>
-      <div className="mb-8">
+      <div className="mb-6">
         <h2 className="text-2xl font-semibold">Vote</h2>
         <p className="text-gray-500">Cast your votes on active proposals</p>
+      </div>
+      
+      {/* Simplified Governance Parameters Section */}
+      <div className="bg-white p-6 rounded-lg shadow mb-6">
+        <div className="mb-4">
+          <div className="flex items-center">
+            <Settings className="h-5 w-5 text-indigo-600 mr-2" />
+            <h3 className="text-lg font-medium">Governance Parameters</h3>
+          </div>
+        </div>
+        
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div className="bg-indigo-50 p-3 rounded-lg">
+            <div className="text-sm text-indigo-700 font-medium">Quorum</div>
+            <div className="text-lg font-bold">{formatNumberDisplay(govParams.quorum)} JST</div>
+          </div>
+          <div className="bg-indigo-50 p-3 rounded-lg">
+            <div className="text-sm text-indigo-700 font-medium">Voting Duration</div>
+            <div className="text-lg font-bold">{formatTimeDuration(govParams.votingDuration)}</div>
+          </div>
+          <div className="bg-indigo-50 p-3 rounded-lg">
+            <div className="text-sm text-indigo-700 font-medium">Proposal Threshold</div>
+            <div className="text-lg font-bold">{formatNumberDisplay(govParams.proposalCreationThreshold)} JST</div>
+          </div>
+          <div className="bg-indigo-50 p-3 rounded-lg">
+            <div className="text-sm text-indigo-700 font-medium">Proposal Stake</div>
+            <div className="text-lg font-bold">{formatNumberDisplay(govParams.proposalStake)} JST</div>
+          </div>
+        </div>
+        
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="p-3 rounded-lg border border-gray-200">
+            <div className="text-sm text-gray-700 font-medium">Defeated Refund</div>
+            <div className="text-lg">{govParams.defeatedRefundPercentage}%</div>
+          </div>
+          <div className="p-3 rounded-lg border border-gray-200">
+            <div className="text-sm text-gray-700 font-medium">Canceled Refund</div>
+            <div className="text-lg">{govParams.canceledRefundPercentage}%</div>
+          </div>
+          <div className="p-3 rounded-lg border border-gray-200">
+            <div className="text-sm text-gray-700 font-medium">Expired Refund</div>
+            <div className="text-lg">{govParams.expiredRefundPercentage}%</div>
+          </div>
+          <div className="p-3 rounded-lg border border-gray-200">
+            <div className="text-sm text-gray-700 font-medium">Timelock Delay</div>
+            <div className="text-lg">{formatTimeDuration(govParams.timelockDelay)}</div>
+          </div>
+        </div>
       </div>
       
       {/* Filter options */}
@@ -837,14 +1133,6 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
               {filter.charAt(0).toUpperCase() + filter.slice(1)}
             </button>
           ))}
-          
-          {/* Refresh button */}
-          <button
-            className="ml-auto px-4 py-2 rounded-full text-sm bg-blue-100 text-blue-800"
-            onClick={() => refreshAllVoteData()}
-          >
-            Refresh Data
-          </button>
         </div>
       </div>
       
@@ -868,6 +1156,9 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
             const voteData = getVoteData(proposal);
             const isPending = hasPendingVote(proposal.id);
             
+            // Get proposal state info for status display
+            const stateInfo = getProposalStateInfo(proposal);
+            
             return (
               <div key={idx} className="bg-white p-8 rounded-lg shadow-md">
                 <div className="flex justify-between items-start mb-5">
@@ -875,9 +1166,15 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                     <h3 className="text-xl font-medium mb-1">{proposal.title}</h3>
                     <p className="text-sm text-gray-500">Proposal #{proposal.id}</p>
                   </div>
-                  <span className="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full flex items-center">
-                    <Clock className="w-4 h-4 mr-1" />
-                    {formatCountdown(proposal.deadline)}
+                  <span className={`text-sm ${stateInfo.color} px-3 py-1 rounded-full flex items-center`}>
+                    {proposal.state === PROPOSAL_STATES.ACTIVE ? (
+                      <>
+                        <Clock className="w-4 h-4 mr-1" />
+                        {formatCountdown(proposal.deadline)}
+                      </>
+                    ) : (
+                      stateInfo.label
+                    )}
                   </span>
                 </div>
                 
@@ -987,8 +1284,8 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                         </div>
                       </div>
                     ) : (
-                      <div className="text-center py-4 text-red-500 bg-red-50 rounded-lg my-3">
-                        You don't have voting power for this proposal. You may need to delegate to yourself or acquire tokens before the snapshot.
+                      <div className="text-center py-6 px-6 text-red-500 bg-red-50 rounded-lg my-3">
+                        You did not have enough voting power at the time of the proposal snapshot
                       </div>
                     )}
                   </div>
@@ -1036,18 +1333,10 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
               {/* Proposal type and status */}
               <div className="flex flex-wrap gap-2 mb-4">
                 <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full">
-                  {selectedProposal.proposalType || "General Proposal"}
+                  {getProposalTypeLabel(selectedProposal)}
                 </span>
-                <span className={`text-xs px-2 py-1 rounded-full ${
-                  selectedProposal.state === PROPOSAL_STATES.ACTIVE 
-                    ? "bg-yellow-100 text-yellow-800"
-                    : selectedProposal.state === PROPOSAL_STATES.SUCCEEDED
-                    ? "bg-green-100 text-green-800"
-                    : selectedProposal.state === PROPOSAL_STATES.DEFEATED
-                    ? "bg-red-100 text-red-800"
-                    : "bg-gray-100 text-gray-800"
-                }`}>
-                  {PROPOSAL_STATES[selectedProposal.state] || "Active"}
+                <span className={`text-xs px-2 py-1 rounded-full ${getProposalStateInfo(selectedProposal).color}`}>
+                  {getProposalStateInfo(selectedProposal).label}
                 </span>
               </div>
               
@@ -1056,7 +1345,7 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                 <div className="flex items-center text-sm">
                   <Calendar className="w-4 h-4 mr-2 text-gray-500" />
                   <div>
-                    <span className="text-gray-600">Created:</span> {new Date(selectedProposal.createdAt*1000).toLocaleDateString()}
+                    <span className="text-gray-600">Created:</span> {formatDate(selectedProposal.createdAt)}
                   </div>
                 </div>
                 <div className="flex items-center text-sm">
@@ -1074,13 +1363,8 @@ const VoteTab = ({ proposals, castVote, hasVoted, getVotingPower, voting, accoun
                 <div className="flex items-center text-sm">
                   <BarChart2 className="w-4 h-4 mr-2 text-gray-500" />
                   <div>
-                    <span className="text-gray-600">Quorum:</span>{" "}
-                    {quorum ? `${formatNumberDisplay(quorum)} JST` : "Loading..."}
-                    {selectedProposal.snapshotId && (
-                      <span className="ml-1 text-xs text-gray-500">
-                        (Snapshot #{selectedProposal.snapshotId})
-                      </span>
-                    )}
+                    <span className="text-gray-600">Snapshot ID:</span>{" "}
+                    {selectedProposal.snapshotId ? `#${selectedProposal.snapshotId}` : "N/A"}
                   </div>
                 </div>
               </div>

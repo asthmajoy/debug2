@@ -1,4 +1,4 @@
-// src/hooks/useVoting.js - Enhanced version that uses BlockchainDataContext
+// src/hooks/useVoting.js - Enhanced version to ensure we get voting data properly
 import { useState, useCallback, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { useWeb3 } from '../contexts/Web3Context';
@@ -159,7 +159,7 @@ export function useVoting() {
         const events = await contracts.governance.queryFilter(filter);
         
         if (events.length > 0) {
-          // Use the most recent vote (in case of any issues)
+          // Use the most recent vote event
           const latestEvent = events[events.length - 1];
           voteType = latestEvent.args.support;
         }
@@ -183,7 +183,7 @@ export function useVoting() {
     }
   }, [contracts, account, isConnected, contractsReady]);
 
-  // Delegate to the context to get proposal vote totals
+  // Enhanced getProposalVoteTotals function with better fallback options
   const getProposalVoteTotals = useCallback(async (proposalId) => {
     if (!contractsReady || !isConnected || !contracts.governance) {
       return {
@@ -205,6 +205,13 @@ export function useVoting() {
     
     try {
       console.log(`Fetching vote totals for proposal ${proposalId} using governance contract`);
+      
+      // Try to get from cache first to avoid excessive blockchain queries
+      const cacheKey = `voteTotals-${proposalId}`;
+      const cachedData = blockchainDataCache.get(cacheKey);
+      if (cachedData !== null) {
+        return cachedData;
+      }
       
       // Call the contract method to get voting power values
       // Note: In this governance system, all vote counts are weighted by JST token voting power
@@ -235,9 +242,8 @@ export function useVoting() {
         totalVoters: totalVoters.toNumber()
       });
       
-      // Return both vote counts and explicit voting power fields
-      // Both sets of values represent the same JST token amounts
-      return {
+      // Create the result object
+      const result = {
         // For backward compatibility, include yesVotes/noVotes/abstainVotes fields
         // These are the same as the voting power values
         yesVotes: yesVotingPower,
@@ -255,24 +261,36 @@ export function useVoting() {
         abstainVotingPower,
         source: 'contract-getter'
       };
+      
+      // Cache the result
+      blockchainDataCache.set(cacheKey, result, 3600); // Cache for 1 hour
+      
+      return result;
     } catch (error) {
       console.error(`Error using getProposalVoteTotals contract method:`, error);
       
-      // If the contract method fails, return consistent zero values
-      return {
-        yesVotes: "0",
-        noVotes: "0",
-        abstainVotes: "0",
-        totalVoters: 0,
-        yesPercentage: 0,
-        noPercentage: 0,
-        abstainPercentage: 0,
-        yesVotingPower: "0",
-        noVotingPower: "0",
-        abstainVotingPower: "0",
-        totalVotingPower: "0",
-        source: 'error'
-      };
+      // Try to get vote data from proposal events as fallback
+      try {
+        return await getIndexedVoteData(proposalId);
+      } catch (fallbackError) {
+        console.error(`Fallback method also failed for proposal ${proposalId}:`, fallbackError);
+        
+        // If all methods fail, return consistent zero values
+        return {
+          yesVotes: "0",
+          noVotes: "0",
+          abstainVotes: "0",
+          totalVoters: 0,
+          yesPercentage: 0,
+          noPercentage: 0,
+          abstainPercentage: 0,
+          yesVotingPower: "0",
+          noVotingPower: "0",
+          abstainVotingPower: "0",
+          totalVotingPower: "0",
+          source: 'error'
+        };
+      }
     }
   }, [contractsReady, isConnected, contracts]);
   
@@ -394,7 +412,7 @@ export function useVoting() {
       for (const event of events) {
         const { voter, support, votingPower } = event.args;
         const voterAddress = voter.toLowerCase();
-        const powerValue = parseFloat(ethers.utils.formatEther(votingPower));
+        const powerValue = ethers.utils.formatEther(votingPower);
         
         // Store or update this voter's vote (only most recent)
         voterVotes.set(voterAddress, {
@@ -410,7 +428,7 @@ export function useVoting() {
       for (const [, voteData] of voterVotes.entries()) {
         const { type, power } = voteData;
         votesByType[type]++;
-        votingPowerByType[type] += power;
+        votingPowerByType[type] += parseFloat(power);
       }
       
       // Calculate totals
@@ -419,16 +437,16 @@ export function useVoting() {
       
       const result = {
         // Vote counts (1 per person)
-        yesVotes: votesByType[1],
-        noVotes: votesByType[0],
-        abstainVotes: votesByType[2],
+        yesVotes: votingPowerByType[1].toString(),
+        noVotes: votingPowerByType[0].toString(),
+        abstainVotes: votingPowerByType[2].toString(),
         totalVotes,
         
         // Voting power
-        yesVotingPower: votingPowerByType[1],
-        noVotingPower: votingPowerByType[0],
-        abstainVotingPower: votingPowerByType[2],
-        totalVotingPower,
+        yesVotingPower: votingPowerByType[1].toString(),
+        noVotingPower: votingPowerByType[0].toString(),
+        abstainVotingPower: votingPowerByType[2].toString(),
+        totalVotingPower: totalVotingPower.toString(),
         
         // Total unique voters
         totalVoters: voterVotes.size,
@@ -439,16 +457,31 @@ export function useVoting() {
         abstainPercentage: totalVotingPower > 0 ? (votingPowerByType[2] / totalVotingPower) * 100 : 0,
         
         // Flag for source of data
-        fromEvents: true
+        source: 'events'
       };
       
       // Cache the result
-      blockchainDataCache.set(cacheKey, result);
+      blockchainDataCache.set(cacheKey, result, 3600); // Cache for 1 hour
       
       return result;
     } catch (error) {
       console.error("Error indexing vote data:", error);
-      return null;
+      
+      // Return empty data structure as fallback
+      return {
+        yesVotes: "0",
+        noVotes: "0",
+        abstainVotes: "0",
+        totalVoters: 0,
+        yesPercentage: 0,
+        noPercentage: 0,
+        abstainPercentage: 0,
+        yesVotingPower: "0",
+        noVotingPower: "0",
+        abstainVotingPower: "0",
+        totalVotingPower: "0",
+        source: 'error'
+      };
     }
   }, [contracts]);
 
